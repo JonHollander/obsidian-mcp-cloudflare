@@ -1,13 +1,12 @@
 #!/bin/bash
-echo "[sync] Container alive"
+echo "[sync] Container alive — pid $$"
 
-# Listen on port 33 — this is what the @cloudflare/containers
-# framework checks internally for container readiness
 node -e "
   require('http').createServer((req, res) => {
+    console.log('[sync] health check hit:', req.url);
     res.writeHead(200);
     res.end('ok');
-  }).listen(33, '0.0.0.0', () => {
-    console.log('[sync] Listening on :33');
+  }).listen(8080, '0.0.0.0', () => {
+    console.log('[sync] Listening on :8080');
   });
 "

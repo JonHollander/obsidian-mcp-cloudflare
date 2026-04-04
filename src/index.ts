@@ -159,7 +159,7 @@ export class ObsidianMCP extends McpAgent<Env> {
 
 export class ObsidianSync extends Container<Env> {
   defaultPort = 8080;
-  sleepAfter = "0s"; // always running
+  sleepAfter = "24h";
   enableInternet = true;
 
   envVars = {
@@ -172,6 +172,19 @@ export class ObsidianSync extends Container<Env> {
     R2_BUCKET_NAME: (this.env as unknown as Env).R2_BUCKET_NAME || "obsidian-vault",
     R2_ACCOUNT_ID: (this.env as unknown as Env).CF_ACCOUNT_ID,
   };
+
+  override onStart() {
+    console.log("[sync] container started");
+  }
+
+  override onStop(opts: { exitCode: number; reason: string }) {
+    console.log("[sync] container stopped:", JSON.stringify(opts));
+  }
+
+  override onError(error: unknown) {
+    console.error("[sync] container error:", error instanceof Error ? error.message : String(error));
+    throw error;
+  }
 }
 
 // ── Fetch handler ───────────────────────────────────────────────
@@ -190,14 +203,21 @@ export default {
 
     // Start sync container via dedicated endpoint
     if (url.pathname === "/sync/start") {
-      const stub = getContainer(
-        env.OBSIDIAN_SYNC as unknown as DurableObjectNamespace<ObsidianSync>
-      );
-      const res = await stub.fetch(new Request("https://container/"));
-      return new Response(
-        JSON.stringify({ status: "started", container: res.status }),
-        { headers: { "Content-Type": "application/json" } }
-      );
+      try {
+        const stub = getContainer(
+          env.OBSIDIAN_SYNC as unknown as DurableObjectNamespace<ObsidianSync>
+        );
+        const res = await stub.fetch(new Request("https://container/"));
+        return new Response(
+          JSON.stringify({ status: "started", container: res.status }),
+          { headers: { "Content-Type": "application/json" } }
+        );
+      } catch (err) {
+        return new Response(
+          JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        );
+      }
     }
 
     return (ObsidianMCP as any).serve("/mcp").fetch(request, env, ctx);

@@ -9,9 +9,9 @@
     "types": "wrangler types"
   },
   "dependencies": {
-    "agents": "^0.0.98",
+    "@cloudflare/containers": "^0.2.2",
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "@cloudflare/containers": "^0.0.4",
+    "agents": "^0.0.98",
     "zod": "^3.24.4"
   },
   "devDependencies": {

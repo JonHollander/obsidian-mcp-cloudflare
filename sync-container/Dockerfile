@@ -5,6 +5,6 @@ RUN mkdir -p /vault /mnt/r2
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 33
+EXPOSE 8080
 
 ENTRYPOINT ["/entrypoint.sh"]
