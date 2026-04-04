@@ -1,7 +1,7 @@
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { Container } from "@cloudflare/containers";
+import { Container, getContainer } from "@cloudflare/containers";
 
 // ── Types ───────────────────────────────────────────────────────
 
@@ -18,7 +18,7 @@ interface Env {
   R2_ACCESS_KEY_ID: string;
   R2_SECRET_ACCESS_KEY: string;
   R2_BUCKET_NAME: string;
-  CF_ACCOUNT_ID: string;
+  CF_ACCOUNT_ID: string; // also used as R2_ACCOUNT_ID
 }
 
 // ── MCP Server ──────────────────────────────────────────────────
@@ -160,20 +160,18 @@ export class ObsidianMCP extends McpAgent<Env> {
 export class ObsidianSync extends Container<Env> {
   defaultPort = 8080;
   sleepAfter = "0s"; // always running
+  enableInternet = true;
 
-  onStart() {
-    const env = this.env as unknown as Env;
-    this.envVars = {
-      OBSIDIAN_EMAIL: env.OBSIDIAN_EMAIL,
-      OBSIDIAN_PASSWORD: env.OBSIDIAN_PASSWORD,
-      VAULT_NAME: env.VAULT_NAME,
-      VAULT_PASSWORD: env.VAULT_PASSWORD,
-      AWS_ACCESS_KEY_ID: env.R2_ACCESS_KEY_ID,
-      AWS_SECRET_ACCESS_KEY: env.R2_SECRET_ACCESS_KEY,
-      R2_BUCKET_NAME: env.R2_BUCKET_NAME || "obsidian-vault",
-      CF_ACCOUNT_ID: env.CF_ACCOUNT_ID,
-    };
-  }
+  envVars = {
+    OBSIDIAN_EMAIL: (this.env as unknown as Env).OBSIDIAN_EMAIL,
+    OBSIDIAN_PASSWORD: (this.env as unknown as Env).OBSIDIAN_PASSWORD,
+    VAULT_NAME: (this.env as unknown as Env).VAULT_NAME,
+    VAULT_PASSWORD: (this.env as unknown as Env).VAULT_PASSWORD,
+    AWS_ACCESS_KEY_ID: (this.env as unknown as Env).R2_ACCESS_KEY_ID,
+    AWS_SECRET_ACCESS_KEY: (this.env as unknown as Env).R2_SECRET_ACCESS_KEY,
+    R2_BUCKET_NAME: (this.env as unknown as Env).R2_BUCKET_NAME || "obsidian-vault",
+    R2_ACCOUNT_ID: (this.env as unknown as Env).CF_ACCOUNT_ID,
+  };
 }
 
 // ── Fetch handler ───────────────────────────────────────────────
@@ -186,6 +184,20 @@ export default {
       if (auth !== `Bearer ${env.MCP_AUTH_TOKEN}`) {
         return new Response("Unauthorized", { status: 401 });
       }
+    }
+
+    const url = new URL(request.url);
+
+    // Start sync container via dedicated endpoint
+    if (url.pathname === "/sync/start") {
+      const stub = getContainer(
+        env.OBSIDIAN_SYNC as unknown as DurableObjectNamespace<ObsidianSync>
+      );
+      const res = await stub.fetch(new Request("https://container/"));
+      return new Response(
+        JSON.stringify({ status: "started", container: res.status }),
+        { headers: { "Content-Type": "application/json" } }
+      );
     }
 
     return (ObsidianMCP as any).serve("/mcp").fetch(request, env, ctx);

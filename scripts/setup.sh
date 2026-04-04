@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Obsidian Cloud MCP — Setup Script
+# Reads .dev.vars and pushes secrets to Cloudflare, creates R2 bucket, etc.
+#
+# Usage:
+#   ./scripts/setup.sh              # Run full setup
+#   ./scripts/setup.sh secrets      # Only push secrets
+#   ./scripts/setup.sh bucket       # Only create R2 bucket
+#   ./scripts/setup.sh deploy       # Only deploy worker
+#   ./scripts/setup.sh deploy --log # Deploy then tail live logs
+#   ./scripts/setup.sh logs         # Tail live logs only
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+DEV_VARS="$PROJECT_DIR/.dev.vars"
+
+# ── Load .dev.vars ──────────────────────────────────────────────
+
+if [ ! -f "$DEV_VARS" ]; then
+  echo "Error: .dev.vars not found. Copy the example and fill in your values:"
+  echo "  cp .dev.vars.example .dev.vars"
+  exit 1
+fi
+
+# Source .dev.vars (skip comments and blank lines)
+set -a
+while IFS= read -r line; do
+  # Skip comments and empty lines
+  [[ "$line" =~ ^[[:space:]]*# ]] && continue
+  [[ -z "${line// }" ]] && continue
+  eval "$line"
+done < "$DEV_VARS"
+set +a
+
+# ── Helpers ─────────────────────────────────────────────────────
+
+push_secret() {
+  local name="$1"
+  local value="${!name:-}"
+  if [ -z "$value" ]; then
+    echo "  ⏭  $name (empty, skipping)"
+    return
+  fi
+  echo "$value" | wrangler secret put "$name" --name obsidian-mcp 2>&1 | tail -1
+  echo "  ✓  $name"
+}
+
+# ── Commands ────────────────────────────────────────────────────
+
+do_bucket() {
+  echo "── Creating R2 bucket ─────────────────────────────────"
+  local bucket="${R2_BUCKET_NAME:-obsidian-vault}"
+  if wrangler r2 bucket list 2>/dev/null | grep -q "$bucket"; then
+    echo "  Bucket '$bucket' already exists"
+  else
+    wrangler r2 bucket create "$bucket"
+    echo "  Created bucket '$bucket'"
+  fi
+}
+
+do_secrets() {
+  echo "── Pushing secrets to Cloudflare ──────────────────────"
+  push_secret CF_ACCOUNT_ID
+  push_secret R2_BUCKET_NAME
+  push_secret R2_ACCESS_KEY_ID
+  push_secret R2_SECRET_ACCESS_KEY
+  push_secret OBSIDIAN_EMAIL
+  push_secret OBSIDIAN_PASSWORD
+  push_secret VAULT_NAME
+  push_secret VAULT_PASSWORD
+  push_secret MCP_AUTH_TOKEN
+}
+
+do_deploy() {
+  echo "── Deploying worker ───────────────────────────────────"
+  cd "$PROJECT_DIR"
+  npm install
+  local deploy_output
+  deploy_output=$(wrangler deploy 2>&1)
+  echo "$deploy_output"
+
+  # Extract the worker URL from deploy output and append /mcp
+  local worker_url
+  worker_url=$(echo "$deploy_output" | grep -oP 'https://[^\s]+\.workers\.dev' | head -1)
+  if [ -n "$worker_url" ]; then
+    WORKER_URL="$worker_url"
+    echo ""
+    echo "════════════════════════════════════════════════════════"
+    echo "  MCP server URL (paste into Claude connectors):"
+    echo ""
+    echo "  ${worker_url}/mcp"
+    echo "════════════════════════════════════════════════════════"
+  fi
+}
+
+do_logs() {
+  echo "── Tailing live logs (Ctrl+C to stop) ─────────────────"
+  echo "  Trigger the container by making an MCP request"
+  echo "  (e.g. ./scripts/test-mcp.sh)"
+  echo ""
+  wrangler tail obsidian-mcp --format pretty
+}
+
+# ── Main ────────────────────────────────────────────────────────
+
+case "${1:-all}" in
+  bucket)
+    do_bucket
+    ;;
+  secrets)
+    do_secrets
+    ;;
+  deploy)
+    do_deploy
+    [[ "${2:-}" == "--log" ]] && do_logs
+    ;;
+  logs)
+    do_logs
+    ;;
+  all)
+    do_bucket
+    echo ""
+    do_secrets
+    echo ""
+    do_deploy
+    [[ "${2:-}" == "--log" ]] && do_logs
+    ;;
+  *)
+    echo "Usage: $0 [bucket|secrets|deploy|logs|all] [--log]"
+    exit 1
+    ;;
+esac

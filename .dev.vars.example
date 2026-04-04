@@ -1,0 +1,30 @@
+# Obsidian Cloud MCP — Environment Variables
+# Copy this file to .dev.vars and fill in your values:
+#   cp .dev.vars.example .dev.vars
+#
+# Used by `wrangler dev` for local development and by
+# `scripts/setup.sh` to push secrets to Cloudflare.
+
+# ── Cloudflare Account ──────────────────────────────────────────
+CLOUDFLARE_ACCOUNT_ID=your-cloudflare-account-id
+
+# ── R2 Bucket ──────────────────────────────────────────────────
+# Bucket name (used by container FUSE mount and wrangler r2 commands)
+R2_BUCKET_NAME=obsidian-vault
+
+# R2 API token credentials (for container FUSE mount)
+# Create at: Cloudflare dashboard → R2 → Manage R2 API Tokens
+R2_ACCESS_KEY_ID=your-r2-access-key-id
+R2_SECRET_ACCESS_KEY=your-r2-secret-access-key
+
+# ── Obsidian Sync ──────────────────────────────────────────────
+OBSIDIAN_EMAIL=you@example.com
+OBSIDIAN_PASSWORD=your-obsidian-password
+VAULT_NAME=your-vault-name
+# Leave empty if vault doesn't use end-to-end encryption
+VAULT_PASSWORD=
+
+# ── MCP Auth (optional) ────────────────────────────────────────
+# Bearer token for authenticating MCP clients. Leave empty to
+# allow unauthenticated access (fine behind Cloudflare Access).
+MCP_AUTH_TOKEN=

@@ -54,6 +54,16 @@ FUSE-mounted filesystem, the Worker via its R2 binding.
 
 ## Setup
 
+### 0. Wrangler Login
+
+Wrangler's default OAuth scopes don't include R2 or Containers. Log in with the
+required scopes upfront to avoid permission errors later:
+
+```bash
+wrangler login --scopes account:read user:read workers:write workers_kv:write \
+  workers_scripts:write workers_tail:read d1:write containers:write
+```
+
 ### 1. Generate Obsidian Auth Token
 
 One-time step on your workstation:
@@ -80,30 +90,32 @@ Create an R2 API token for the Container's FUSE mount:
 2. Create token with **Object Read & Write** on `obsidian-vault`
 3. Save the Access Key ID and Secret Access Key
 
-### 3. Set Secrets
+### 3. Configure Environment
+
+Copy the example env file and fill in your values:
 
 ```bash
-# Container secrets (Obsidian auth)
-wrangler secret put OBSIDIAN_EMAIL
-wrangler secret put OBSIDIAN_PASSWORD
-wrangler secret put VAULT_NAME
-wrangler secret put VAULT_PASSWORD        # if vault uses E2EE
-
-# Container secrets (R2 FUSE mount)
-wrangler secret put R2_ACCESS_KEY_ID
-wrangler secret put R2_SECRET_ACCESS_KEY
-wrangler secret put R2_BUCKET_NAME        # "obsidian-vault"
-wrangler secret put CF_ACCOUNT_ID
-
-# Optional: bearer token for MCP auth
-wrangler secret put MCP_AUTH_TOKEN
+cp .dev.vars.example .dev.vars
 ```
+
+Edit `.dev.vars` with your Cloudflare account ID, R2 credentials, and Obsidian
+auth. This file is used by `wrangler dev` for local development and by the
+setup script to push secrets to Cloudflare. It's already in `.gitignore`.
 
 ### 4. Deploy
 
+Run the setup script to create the R2 bucket, push all secrets, and deploy:
+
 ```bash
-npm install
-wrangler deploy
+./scripts/setup.sh
+```
+
+Or run steps individually:
+
+```bash
+./scripts/setup.sh bucket   # Create R2 bucket
+./scripts/setup.sh secrets  # Push secrets to Cloudflare
+./scripts/setup.sh deploy   # Install deps + deploy worker
 ```
 
 Your MCP server is live at:
@@ -113,8 +125,9 @@ Your MCP server is live at:
 
 **Claude.ai (web)**
 
-Settings → Integrations → Add custom integration:
+Settings → Connectors → Add custom connector:
 - URL: `https://obsidian-mcp.<your-subdomain>.workers.dev/mcp`
+- Leave OAuth fields blank if using bearer token auth
 
 **Claude Code**
 
@@ -185,6 +198,9 @@ obsidian-mcp/
 ├── sync-container/
 │   ├── Dockerfile            # Headless sync + FUSE mount
 │   └── entrypoint.sh         # Auth, mount, sync, mirror
+├── scripts/
+│   └── setup.sh              # Create bucket, push secrets, deploy
+├── .dev.vars.example         # Template for env vars / secrets
 ├── wrangler.jsonc            # Worker + R2 + Container config
 └── package.json
 ```
