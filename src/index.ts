@@ -173,6 +173,15 @@ export class ObsidianSync extends Container<Env> {
     R2_ACCOUNT_ID: (this.env as unknown as Env).CF_ACCOUNT_ID,
   };
 
+  override async fetch(request: Request): Promise<Response> {
+    const path = new URL(request.url).pathname;
+    if (path === "/__destroy__") {
+      await this.destroy();
+      return new Response("destroyed");
+    }
+    return super.fetch(request);
+  }
+
   override onStart() {
     console.log("[sync] container started");
   }
@@ -201,17 +210,34 @@ export default {
 
     const url = new URL(request.url);
 
-    // Start sync container via dedicated endpoint
-    if (url.pathname === "/sync/start") {
+    // Sync container endpoints
+    if (url.pathname.startsWith("/sync/")) {
       try {
         const stub = getContainer(
           env.OBSIDIAN_SYNC as unknown as DurableObjectNamespace<ObsidianSync>
         );
-        const res = await stub.fetch(new Request("https://container/"));
-        return new Response(
-          JSON.stringify({ status: "started", container: res.status }),
-          { headers: { "Content-Type": "application/json" } }
-        );
+
+        if (url.pathname === "/sync/restart") {
+          try { await stub.fetch(new Request("https://container/__destroy__")); } catch {}
+          await new Promise((r) => setTimeout(r, 2000));
+          const res = await stub.fetch(new Request("https://container/"));
+          return new Response(
+            JSON.stringify({ status: "restarted", container: res.status }),
+            { headers: { "Content-Type": "application/json" } }
+          );
+        }
+
+        const subpath = url.pathname === "/sync/start" ? "/" :
+                        url.pathname === "/sync/logs" ? "/logs" :
+                        url.pathname === "/sync/status" ? "/status" : "/";
+        const res = await stub.fetch(new Request(`https://container${subpath}`));
+        if (url.pathname === "/sync/start") {
+          return new Response(
+            JSON.stringify({ status: "started", container: res.status }),
+            { headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return res;
       } catch (err) {
         return new Response(
           JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
