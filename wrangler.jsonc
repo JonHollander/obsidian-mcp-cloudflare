@@ -1,0 +1,43 @@
+{
+  "name": "obsidian-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-04-01",
+
+  // R2 bucket for vault storage
+  "r2_buckets": [
+    {
+      "binding": "VAULT",
+      "bucket_name": "obsidian-vault"
+    }
+  ],
+
+  // Durable Objects: MCP server + sync container
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MCP_OBJECT",
+        "class_name": "ObsidianMCP"
+      },
+      {
+        "name": "OBSIDIAN_SYNC",
+        "class_name": "ObsidianSync"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ObsidianMCP", "ObsidianSync"]
+    }
+  ],
+
+  // Sync container
+  "containers": [
+    {
+      "class_name": "ObsidianSync",
+      "image": "./sync-container",
+      "max_instances": 1
+    }
+  ]
+}
