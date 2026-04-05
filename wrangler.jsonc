@@ -8,10 +8,6 @@
 		{
 			"binding": "VAULT",
 			"bucket_name": "obsidian-vault"
-		},
-		{
-			"bucket_name": "obsidian-vault",
-			"binding": "obsidian_vault"
 		}
 	],
 	// Durable Objects: MCP server + sync container

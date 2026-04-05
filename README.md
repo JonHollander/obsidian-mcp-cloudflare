@@ -56,13 +56,11 @@ FUSE-mounted filesystem, the Worker via its R2 binding.
 
 ### 0. Wrangler Login
 
-Wrangler's default OAuth scopes don't include R2 or Containers. Log in with the
-required scopes upfront to avoid permission errors later:
-
 ```bash
-wrangler login --scopes account:read user:read workers:write workers_kv:write \
-  workers_scripts:write workers_tail:read d1:write containers:write
+wrangler login
 ```
+
+All required scopes are granted by default.
 
 ### 1. Generate Obsidian Auth Token
 
@@ -113,9 +111,13 @@ Run the setup script to create the R2 bucket, push all secrets, and deploy:
 Or run steps individually:
 
 ```bash
-./scripts/setup.sh bucket   # Create R2 bucket
-./scripts/setup.sh secrets  # Push secrets to Cloudflare
-./scripts/setup.sh deploy   # Install deps + deploy worker
+./scripts/setup.sh bucket          # Create R2 bucket
+./scripts/setup.sh secrets         # Push secrets to Cloudflare
+./scripts/setup.sh validate        # Check prerequisites
+./scripts/setup.sh deploy          # Validate + install deps + deploy + restart container
+./scripts/setup.sh status          # Check sync container health
+./scripts/setup.sh restart         # Restart sync container
+./scripts/setup.sh container-logs  # View sync container logs
 ```
 
 Your MCP server is live at:
@@ -126,8 +128,8 @@ Your MCP server is live at:
 **Claude.ai (web)**
 
 Settings → Connectors → Add custom connector:
-- URL: `https://obsidian-mcp.<your-subdomain>.workers.dev/mcp`
-- Leave OAuth fields blank if using bearer token auth
+- URL: `https://obsidian-mcp.<your-subdomain>.workers.dev/mcp?token=YOUR_MCP_AUTH_TOKEN`
+- Leave OAuth fields blank — the token in the URL handles auth
 
 **Claude Code**
 
@@ -211,13 +213,16 @@ These are left as exercises to harden the setup for your needs:
 
 ### Auth Hardening
 
-The included bearer token auth (`MCP_AUTH_TOKEN` secret) works for personal use.
-For shared or public deployments:
+The included auth (`MCP_AUTH_TOKEN` secret) supports both `Authorization: Bearer`
+headers and `?token=` query params. The URL token approach is convenient for
+Claude.ai connectors where custom headers aren't always available.
 
+For shared or public deployments, consider stronger options:
+
+- **Cloudflare Access**: Put [Zero Trust Access](https://developers.cloudflare.com/cloudflare-one/policies/access/)
+  in front of the Worker for identity-based SSO with audit logs and no code changes
 - **OAuth**: Integrate [`workers-oauth-provider`](https://github.com/cloudflare/workers-oauth-provider)
   for GitHub/Google OAuth flows
-- **Cloudflare Access**: Put [Zero Trust Access](https://developers.cloudflare.com/cloudflare-one/policies/access/)
-  in front of the Worker for SSO with no code changes
 
 ### Container Auth
 
@@ -247,6 +252,26 @@ add last-modified checks before writes.
 
 Currently filters to `.md` only. Extend to support images, PDFs, and other
 vault attachments with additional tools.
+
+## Troubleshooting
+
+**Docker must be running** — The sync container requires Docker. Run `docker info`
+to verify. The `validate` subcommand checks this automatically.
+
+**Two passwords** — `OBSIDIAN_PASSWORD` is your Obsidian account password (used
+to log in at obsidian.md). `VAULT_PASSWORD` is the separate end-to-end encryption
+password set in Obsidian → Sync → Encryption. Leave `VAULT_PASSWORD` empty if
+your vault doesn't use E2EE.
+
+**Deploy doesn't restart containers** — `wrangler deploy` does not restart running
+containers. The setup script handles this automatically. If deploying manually,
+restart with `./scripts/setup.sh restart`.
+
+**Container logs not in wrangler tail** — Container stdout is not streamed through
+`wrangler tail`. Use `./scripts/setup.sh container-logs` instead.
+
+**Build fails at tigrisfs** — The FUSE mount binary is fetched during Docker build.
+Check your network and Docker setup. The version is pinned in the Dockerfile.
 
 ## Component Reference
 

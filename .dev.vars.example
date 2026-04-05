@@ -14,17 +14,24 @@ R2_BUCKET_NAME=obsidian-vault
 
 # R2 API token credentials (for container FUSE mount)
 # Create at: Cloudflare dashboard → R2 → Manage R2 API Tokens
+# (or let setup.sh auto-generate these in a future release)
 R2_ACCESS_KEY_ID=your-r2-access-key-id
 R2_SECRET_ACCESS_KEY=your-r2-secret-access-key
 
 # ── Obsidian Sync ──────────────────────────────────────────────
 OBSIDIAN_EMAIL=you@example.com
+
+# Your Obsidian ACCOUNT password (the one you use to log in at obsidian.md)
 OBSIDIAN_PASSWORD=your-obsidian-password
+
 VAULT_NAME=your-vault-name
-# Leave empty if vault doesn't use end-to-end encryption
+
+# Your vault's END-TO-END ENCRYPTION password (set in Obsidian → Sync → Encryption)
+# This is a DIFFERENT password from your account password above.
+# Leave empty if your vault does NOT use end-to-end encryption.
 VAULT_PASSWORD=
 
 # ── MCP Auth (optional) ────────────────────────────────────────
-# Bearer token for authenticating MCP clients. Leave empty to
-# allow unauthenticated access (fine behind Cloudflare Access).
+# Token for authenticating MCP clients (supports both Bearer header
+# and ?token= URL param). Leave empty for unauthenticated access.
 MCP_AUTH_TOKEN=

@@ -18,7 +18,7 @@ interface Env {
   R2_ACCESS_KEY_ID: string;
   R2_SECRET_ACCESS_KEY: string;
   R2_BUCKET_NAME: string;
-  CF_ACCOUNT_ID: string; // also used as R2_ACCOUNT_ID
+  CLOUDFLARE_ACCOUNT_ID: string; // also used as R2_ACCOUNT_ID
 }
 
 // ── MCP Server ──────────────────────────────────────────────────
@@ -170,7 +170,7 @@ export class ObsidianSync extends Container<Env> {
     AWS_ACCESS_KEY_ID: (this.env as unknown as Env).R2_ACCESS_KEY_ID,
     AWS_SECRET_ACCESS_KEY: (this.env as unknown as Env).R2_SECRET_ACCESS_KEY,
     R2_BUCKET_NAME: (this.env as unknown as Env).R2_BUCKET_NAME || "obsidian-vault",
-    R2_ACCOUNT_ID: (this.env as unknown as Env).CF_ACCOUNT_ID,
+    R2_ACCOUNT_ID: (this.env as unknown as Env).CLOUDFLARE_ACCOUNT_ID,
   };
 
   override async fetch(request: Request): Promise<Response> {
@@ -200,15 +200,18 @@ export class ObsidianSync extends Container<Env> {
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    // Optional bearer token auth
+    const url = new URL(request.url);
+
+    // Optional auth: Bearer header or ?token= query param
     if (env.MCP_AUTH_TOKEN) {
       const auth = request.headers.get("Authorization");
-      if (auth !== `Bearer ${env.MCP_AUTH_TOKEN}`) {
+      // Extract token from raw query to avoid + being decoded as space
+      const rawToken = url.search.match(/[?&]token=([^&]*)/)?.[1];
+      const urlToken = rawToken ? decodeURIComponent(rawToken) : null;
+      if (auth !== `Bearer ${env.MCP_AUTH_TOKEN}` && urlToken !== env.MCP_AUTH_TOKEN) {
         return new Response("Unauthorized", { status: 401 });
       }
     }
-
-    const url = new URL(request.url);
 
     // Sync container endpoints
     if (url.pathname.startsWith("/sync/")) {
