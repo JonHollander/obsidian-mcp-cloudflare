@@ -8,6 +8,7 @@ echo "[sync] Container starting — pid $$" | tee -a "$LOG_FILE"
 node -e "
   const fs = require('fs');
   const http = require('http');
+  const { execSync } = require('child_process');
   http.createServer((req, res) => {
     if (req.url === '/logs') {
       res.writeHead(200, {'Content-Type':'text/plain'});
@@ -25,6 +26,18 @@ node -e "
         syncRunning: logs.includes('Starting ob sync'),
         lastLines: logs.split('\\n').slice(-20)
       }));
+    } else if (req.url === '/trigger-sync') {
+      // Immediate rsync R2→vault so ob sync picks up new R2 writes
+      try {
+        execSync('rsync -a --include=\"*.md\" --include=\"*/\" --exclude=\"*\" --exclude=\".obsidian*\" /mnt/r2/ /vault/ 2>&1', {timeout: 15000});
+        fs.appendFileSync('$LOG_FILE', '[sync] trigger-sync: R2→vault rsync done\\n');
+        res.writeHead(200, {'Content-Type':'application/json'});
+        res.end(JSON.stringify({status: 'synced'}));
+      } catch(e) {
+        fs.appendFileSync('$LOG_FILE', '[sync] trigger-sync error: ' + e.message + '\\n');
+        res.writeHead(500, {'Content-Type':'application/json'});
+        res.end(JSON.stringify({status: 'error', message: e.message}));
+      }
     } else {
       res.writeHead(200);
       res.end('ok');

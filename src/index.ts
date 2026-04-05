@@ -110,6 +110,7 @@ export class ObsidianMCP extends McpAgent<Env> {
       },
       async ({ path, content }) => {
         await this.env.VAULT.put(path, content);
+        await this.triggerSync();
         return { content: [{ type: "text", text: `Wrote ${path}` }] };
       }
     );
@@ -126,6 +127,7 @@ export class ObsidianMCP extends McpAgent<Env> {
         const existing = await this.env.VAULT.get(path);
         const prev = existing ? await existing.text() : "";
         await this.env.VAULT.put(path, prev + "\n" + content);
+        await this.triggerSync();
         return { content: [{ type: "text", text: `Appended to ${path}` }] };
       }
     );
@@ -137,9 +139,22 @@ export class ObsidianMCP extends McpAgent<Env> {
       { path: z.string().describe("Path of the note to delete") },
       async ({ path }) => {
         await this.env.VAULT.delete(path);
+        await this.triggerSync();
         return { content: [{ type: "text", text: `Deleted ${path}` }] };
       }
     );
+  }
+
+  // ── Helper: trigger container sync after R2 writes ──────────
+  private async triggerSync(): Promise<void> {
+    try {
+      const stub = getContainer(
+        this.env.OBSIDIAN_SYNC as unknown as DurableObjectNamespace<ObsidianSync>
+      );
+      await stub.fetch(new Request("https://container/trigger-sync"));
+    } catch {
+      // Best-effort — don't fail the tool call if sync trigger fails
+    }
   }
 
   // ── Helper: paginated R2 list ───────────────────────────────
@@ -232,7 +247,8 @@ export default {
 
         const subpath = url.pathname === "/sync/start" ? "/" :
                         url.pathname === "/sync/logs" ? "/logs" :
-                        url.pathname === "/sync/status" ? "/status" : "/";
+                        url.pathname === "/sync/status" ? "/status" :
+                        url.pathname === "/sync/trigger" ? "/trigger-sync" : "/";
         const res = await stub.fetch(new Request(`https://container${subpath}`));
         if (url.pathname === "/sync/start") {
           return new Response(
