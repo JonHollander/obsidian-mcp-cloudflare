@@ -77,19 +77,23 @@ if [ ! -d "/vault/.obsidian-headless" ]; then
   echo "[sync] Vault setup OK" | tee -a "$LOG_FILE"
 fi
 
-# ── rsync mirror loop: /vault → /mnt/r2 ─────────────────────────
+# ── rsync mirror loop: bidirectional /vault ↔ /mnt/r2 ────────────
 (
   while true; do
     if mountpoint -q /mnt/r2 2>/dev/null; then
       rsync -a \
         --include='*.md' --include='*/' --exclude='*' \
         --exclude='.obsidian*' \
-        /vault/ /mnt/r2/ 2>&1 | tee -a "$LOG_FILE" || echo "[sync] rsync error" | tee -a "$LOG_FILE"
+        /mnt/r2/ /vault/ 2>&1 | tee -a "$LOG_FILE" || echo "[sync] rsync R2→vault error" | tee -a "$LOG_FILE"
+      rsync -a \
+        --include='*.md' --include='*/' --exclude='*' \
+        --exclude='.obsidian*' \
+        /vault/ /mnt/r2/ 2>&1 | tee -a "$LOG_FILE" || echo "[sync] rsync vault→R2 error" | tee -a "$LOG_FILE"
     fi
     sleep 10
   done
 ) &
-echo "[sync] rsync mirror loop started (every 10s)" | tee -a "$LOG_FILE"
+echo "[sync] rsync mirror loop started — bidirectional (every 10s)" | tee -a "$LOG_FILE"
 
 # ── Run continuous sync ─────────────────────────────────────────
 echo "[sync] Starting ob sync --continuous" | tee -a "$LOG_FILE"
