@@ -143,6 +143,184 @@ export class ObsidianMCP extends McpAgent<Env> {
         return { content: [{ type: "text", text: `Deleted ${path}` }] };
       }
     );
+
+    // ── Create a folder ───────────────────────────────────────
+    const FOLDER_PLACEHOLDER = ".folder-placeholder.md";
+
+    this.server.tool(
+      "create_folder",
+      "Create a folder in the vault. Creates all intermediate folders in the path (like mkdir -p). A small placeholder .md file is added so the folder syncs to Obsidian.",
+      {
+        path: z.string().describe(
+          "Folder path, e.g. 'projects/2026/research'. No trailing slash needed."
+        ),
+      },
+      async ({ path }) => {
+        const normalized = path.replace(/^\/+|\/+$/g, "");
+        if (!normalized) {
+          return {
+            content: [{ type: "text", text: "Error: folder path cannot be empty" }],
+          };
+        }
+
+        const parts = normalized.split("/");
+        const created: string[] = [];
+
+        for (let i = 1; i <= parts.length; i++) {
+          const segment = parts.slice(0, i).join("/");
+          const placeholderKey = segment + "/" + FOLDER_PLACEHOLDER;
+          const existing = await this.env.VAULT.head(placeholderKey);
+          if (!existing) {
+            await this.env.VAULT.put(placeholderKey, "");
+            created.push(segment + "/");
+          }
+        }
+
+        await this.triggerSync();
+
+        if (created.length === 0) {
+          return {
+            content: [{ type: "text", text: `Folder already exists: ${normalized}/` }],
+          };
+        }
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Created folder${created.length > 1 ? "s" : ""}: ${created.join(", ")}`,
+            },
+          ],
+        };
+      }
+    );
+
+    // ── Delete a folder ───────────────────────────────────────
+    this.server.tool(
+      "delete_folder",
+      "Delete a folder from the vault. By default only deletes empty folders. Set recursive=true to delete the folder and all its contents.",
+      {
+        path: z.string().describe(
+          "Folder path to delete, e.g. 'projects/old'. No trailing slash needed."
+        ),
+        recursive: z
+          .boolean()
+          .default(false)
+          .describe(
+            "If true, delete the folder and all its contents. If false (default), only delete if the folder is empty."
+          ),
+      },
+      async ({ path, recursive }) => {
+        const normalized = path.replace(/^\/+|\/+$/g, "");
+        if (!normalized) {
+          return {
+            content: [{ type: "text", text: "Error: folder path cannot be empty" }],
+          };
+        }
+        const folderPrefix = normalized + "/";
+
+        // List all objects under this prefix
+        const objects: R2Object[] = [];
+        let cursor: string | undefined;
+        do {
+          const listed = await this.env.VAULT.list({
+            prefix: folderPrefix,
+            cursor,
+            limit: 1000,
+          });
+          objects.push(...listed.objects);
+          cursor = listed.truncated ? listed.cursor : undefined;
+        } while (cursor);
+
+        if (objects.length === 0) {
+          return {
+            content: [{ type: "text", text: `Folder not found: ${normalized}/` }],
+          };
+        }
+
+        // Separate user content from folder placeholders
+        const userContent = objects.filter(
+          (o) => !o.key.endsWith("/" + FOLDER_PLACEHOLDER)
+        );
+
+        if (!recursive && userContent.length > 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Folder '${normalized}/' is not empty (${userContent.length} item(s)). Use recursive=true to delete folder and all contents.`,
+              },
+            ],
+          };
+        }
+
+        // Batch delete all objects (R2 supports up to 1000 keys per call)
+        const keysToDelete = objects.map((o) => o.key);
+        for (let i = 0; i < keysToDelete.length; i += 1000) {
+          await this.env.VAULT.delete(keysToDelete.slice(i, i + 1000));
+        }
+
+        await this.triggerSync();
+
+        const msg =
+          recursive && userContent.length > 0
+            ? `Deleted folder '${normalized}/' and ${userContent.length} item(s)`
+            : `Deleted folder: ${normalized}/`;
+        return { content: [{ type: "text", text: msg }] };
+      }
+    );
+
+    // ── List folders ──────────────────────────────────────────
+    this.server.tool(
+      "list_folders",
+      "List subfolders at a given path in the vault. Returns immediate child folders only.",
+      {
+        path: z
+          .string()
+          .default("")
+          .describe(
+            "Parent folder path, e.g. 'projects'. Empty string for vault root. No trailing slash needed."
+          ),
+      },
+      async ({ path }) => {
+        const normalized = path.replace(/^\/+|\/+$/g, "");
+        const prefix = normalized ? normalized + "/" : "";
+
+        const listed = await this.env.VAULT.list({
+          prefix,
+          delimiter: "/",
+        });
+
+        const folders = listed.delimitedPrefixes.map((p) =>
+          p.slice(prefix.length).replace(/\/$/, "")
+        );
+
+        if (folders.length === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: normalized
+                  ? `No subfolders found in: ${normalized}/`
+                  : "No folders found in vault root.",
+              },
+            ],
+          };
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                { parent: normalized || "/", folders },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+    );
   }
 
   // ── Helper: trigger container sync after R2 writes ──────────
