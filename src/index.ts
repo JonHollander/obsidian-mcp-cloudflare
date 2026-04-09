@@ -143,34 +143,6 @@ export class ObsidianMCP extends McpAgent<Env> {
         return { content: [{ type: "text", text: `Deleted ${path}` }] };
       }
     );
-
-    // ── Delete a folder ───────────────────────────────────────
-    this.server.tool(
-      "delete_folder",
-      "Delete a folder and all its contents from the vault",
-      { path: z.string().describe("Folder path to delete, e.g. 'projects/old-stuff'") },
-      async ({ path }) => {
-        const prefix = path.endsWith("/") ? path : path + "/";
-        const objects: R2Object[] = [];
-        let cursor: string | undefined;
-        do {
-          const listed = await this.env.VAULT.list({ prefix, cursor, limit: 1000 });
-          objects.push(...listed.objects);
-          cursor = listed.truncated ? listed.cursor : undefined;
-        } while (cursor);
-
-        if (objects.length === 0) {
-          return { content: [{ type: "text", text: `No folder found at: ${prefix}` }] };
-        }
-
-        const keys = objects.map((o) => o.key);
-        await this.env.VAULT.delete(keys);
-        await this.triggerSync();
-        return {
-          content: [{ type: "text", text: `Deleted folder ${prefix} (${keys.length} files)` }],
-        };
-      }
-    );
   }
 
   // ── Helper: trigger container sync after R2 writes ──────────
