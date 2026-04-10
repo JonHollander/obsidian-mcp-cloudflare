@@ -27,10 +27,12 @@ node -e "
         lastLines: logs.split('\\n').slice(-20)
       }));
     } else if (req.url === '/trigger-sync') {
-      // Immediate rsync R2→vault so ob sync picks up new R2 writes
+      // Two-phase sync: first push vault→R2 (protect new Obsidian files),
+      // then pull R2→vault with --delete (propagate MCP deletions)
       try {
-        execSync('rsync -a --include=\"*.md\" --include=\"*/\" --exclude=\"*\" --exclude=\".obsidian*\" /mnt/r2/ /vault/ 2>&1', {timeout: 15000});
-        fs.appendFileSync('$LOG_FILE', '[sync] trigger-sync: R2→vault rsync done\\n');
+        execSync('rsync -a --exclude=\".obsidian*\" --include=\"*.md\" --include=\"*/\" --exclude=\"*\" /vault/ /mnt/r2/ 2>&1', {timeout: 15000});
+        execSync('rsync -a --delete --exclude=\".obsidian*\" --include=\"*.md\" --include=\"*/\" --exclude=\"*\" /mnt/r2/ /vault/ 2>&1', {timeout: 15000});
+        fs.appendFileSync('$LOG_FILE', '[sync] trigger-sync: two-phase rsync done\\n');
         res.writeHead(200, {'Content-Type':'application/json'});
         res.end(JSON.stringify({status: 'synced'}));
       } catch(e) {
@@ -94,13 +96,13 @@ fi
 (
   while true; do
     if mountpoint -q /mnt/r2 2>/dev/null; then
+      # Step 1: Pull new MCP writes from R2 (no --delete)
       rsync -a \
-        --include='*.md' --include='*/' --exclude='*' \
-        --exclude='.obsidian*' \
+        --exclude='.obsidian*' --include='*.md' --include='*/' --exclude='*' \
         /mnt/r2/ /vault/ 2>&1 | tee -a "$LOG_FILE" || echo "[sync] rsync R2→vault error" | tee -a "$LOG_FILE"
-      rsync -a \
-        --include='*.md' --include='*/' --exclude='*' \
-        --exclude='.obsidian*' \
+      # Step 2: Push vault state to R2, propagating Obsidian deletions (--delete)
+      rsync -a --delete \
+        --exclude='.obsidian*' --include='*.md' --include='*/' --exclude='*' \
         /vault/ /mnt/r2/ 2>&1 | tee -a "$LOG_FILE" || echo "[sync] rsync vault→R2 error" | tee -a "$LOG_FILE"
     fi
     sleep 10
