@@ -1,7 +1,7 @@
 # Obsidian + Claude via Cloudflare
 
 Access your Obsidian vault from Claude (web, desktop, Code) using an MCP server
-on Cloudflare Workers + Containers + R2.
+on Cloudflare Workers + Containers.
 
 No NAS, no Docker Compose, no tunnels. Just Cloudflare infrastructure with the
 Agents SDK for a proper MCP server.
@@ -15,12 +15,9 @@ Obsidian (phone, desktop)
         ▼
 Cloudflare Container (Node.js 22)
    runs `ob sync --continuous`
-   writes to R2 via FUSE mount
-        │
-        ▼
-Cloudflare R2 (vault file storage)
+   serves vault files over HTTP API
         ▲
-        │ R2 binding (native)
+        │ container fetch (native)
         │
 Cloudflare Worker (MCP server via Agents SDK)
    tools: list, read, search, write, append, delete
@@ -31,8 +28,9 @@ Cloudflare Worker (MCP server via Agents SDK)
 Claude (web, desktop, Code)
 ```
 
-The Container and Worker both access the same R2 bucket — the Container via
-FUSE-mounted filesystem, the Worker via its R2 binding.
+The Container is the single source of truth. It runs `obsidian-headless` to sync
+with Obsidian Sync and exposes an HTTP API for file operations. The Worker proxies
+all MCP tool calls to the Container's API.
 
 ## MCP Tools
 
@@ -44,6 +42,9 @@ FUSE-mounted filesystem, the Worker via its R2 binding.
 | `write_note` | Create or overwrite a note |
 | `append_to_note` | Append to an existing note (or create it) |
 | `delete_note` | Delete a note |
+| `create_folder` | Create a folder (with intermediate directories) |
+| `delete_folder` | Delete a folder (empty or recursive) |
+| `list_folders` | List immediate subfolders at a path |
 
 ## Prerequisites
 
@@ -76,19 +77,7 @@ ob sync-list-remote
 # Note your vault name
 ```
 
-### 2. Create the R2 Bucket
-
-```bash
-wrangler r2 bucket create obsidian-vault
-```
-
-Create an R2 API token for the Container's FUSE mount:
-
-1. Cloudflare dashboard → R2 → Overview → Manage R2 API Tokens
-2. Create token with **Object Read & Write** on `obsidian-vault`
-3. Save the Access Key ID and Secret Access Key
-
-### 3. Configure Environment
+### 2. Configure Environment
 
 Copy the example env file and fill in your values:
 
@@ -96,13 +85,13 @@ Copy the example env file and fill in your values:
 cp .dev.vars.example .dev.vars
 ```
 
-Edit `.dev.vars` with your Cloudflare account ID, R2 credentials, and Obsidian
-auth. This file is used by `wrangler dev` for local development and by the
-setup script to push secrets to Cloudflare. It's already in `.gitignore`.
+Edit `.dev.vars` with your Obsidian credentials and optional MCP auth token.
+This file is used by `wrangler dev` for local development and by the setup
+script to push secrets to Cloudflare. It's already in `.gitignore`.
 
-### 4. Deploy
+### 3. Deploy
 
-Run the setup script to create the R2 bucket, push all secrets, and deploy:
+Run the setup script to push all secrets and deploy:
 
 ```bash
 ./scripts/setup.sh
@@ -111,7 +100,6 @@ Run the setup script to create the R2 bucket, push all secrets, and deploy:
 Or run steps individually:
 
 ```bash
-./scripts/setup.sh bucket          # Create R2 bucket
 ./scripts/setup.sh secrets         # Push secrets to Cloudflare
 ./scripts/setup.sh validate        # Check prerequisites
 ./scripts/setup.sh deploy          # Validate + install deps + deploy + restart container
@@ -123,7 +111,7 @@ Or run steps individually:
 Your MCP server is live at:
 `https://obsidian-mcp.<your-subdomain>.workers.dev/mcp`
 
-### 5. Connect Claude
+### 4. Connect Claude
 
 **Claude.ai (web)**
 
@@ -161,15 +149,15 @@ Add to `claude_desktop_config.json`:
 
 1. Obsidian Sync pushes the change
 2. Container's `ob sync --continuous` pulls it to `/vault`
-3. rsync mirrors it to `/mnt/r2` (R2 via FUSE)
-4. Next time Claude reads or searches, it sees the update via R2 binding
+3. Next time Claude reads or searches, the Worker proxies the request to the
+   Container's HTTP API which reads directly from `/vault`
 
 ### Claude creates a note:
 
-1. Worker writes to R2 via binding (`VAULT.put()`)
-2. Container's FUSE mount sees the new file on R2
-3. rsync picks it up (or `ob sync` detects it if writing directly)
-4. `ob sync` pushes it upstream via Obsidian Sync
+1. Worker receives MCP `write_note` call
+2. Worker proxies it to the Container's HTTP API
+3. Container writes the file to `/vault`
+4. `ob sync` detects the new file and pushes it via Obsidian Sync
 5. It appears on your phone and desktop
 
 ## Development
@@ -187,7 +175,6 @@ npm run deploy
 | Service | Usage | Cost |
 |---|---|---|
 | Workers Paid Plan | Already paying | $5/month (covers everything) |
-| R2 | Markdown vault, <100MB | Free tier (10GB included) |
 | Container | 1 instance, mostly idle | Included in Workers plan |
 | **Total additional** | | **$0** |
 
@@ -196,14 +183,15 @@ npm run deploy
 ```
 obsidian-mcp/
 ├── src/
-│   └── index.ts              # MCP server (Agents SDK + R2)
+│   └── index.ts              # MCP server (Agents SDK, proxies to container)
 ├── sync-container/
-│   ├── Dockerfile            # Headless sync + FUSE mount
-│   └── entrypoint.sh         # Auth, mount, sync, mirror
+│   ├── Dockerfile            # Headless sync container image
+│   ├── entrypoint.sh         # Auth, sync startup
+│   └── server.js             # HTTP API for vault file operations
 ├── scripts/
-│   └── setup.sh              # Create bucket, push secrets, deploy
+│   └── setup.sh              # Push secrets, deploy
 ├── .dev.vars.example         # Template for env vars / secrets
-├── wrangler.jsonc            # Worker + R2 + Container config
+├── wrangler.jsonc            # Worker + Container config
 └── package.json
 ```
 
@@ -228,25 +216,19 @@ For shared or public deployments, consider stronger options:
 
 Check whether `obsidian-headless` supports `--token` or env-var-based auth for
 `ob login` to avoid interactive prompts. If not, persist the auth session from a
-one-time interactive login to an R2 object and restore it on container start.
+one-time interactive login and restore it on container start.
 
 ### Container Restart Resilience
 
 The `ob` sqlite state file lives on ephemeral container disk. A restart triggers
-a full re-sync. To fix: add a SIGTERM trap in `entrypoint.sh` that uploads the
-state file to R2, and restore it on startup.
+a full re-sync. To fix: add a SIGTERM trap in `entrypoint.sh` that persists the
+state file, and restore it on startup.
 
 ### Search Performance
 
-The brute-force search reads every `.md` from R2 per query — fine for <500 files.
+The brute-force search reads every `.md` file per query — fine for <500 files.
 For larger vaults, build a search index in [D1](https://developers.cloudflare.com/d1/)
-or [Workers KV](https://developers.cloudflare.com/kv/), updated by the rsync loop.
-
-### Bidirectional Sync Conflicts
-
-MCP `write_note` writes directly to R2 while the container's rsync also writes.
-Options: write to a staging prefix (`_incoming/`), use R2 event notifications, or
-add last-modified checks before writes.
+or [Workers KV](https://developers.cloudflare.com/kv/).
 
 ### Attachments
 
@@ -270,16 +252,11 @@ restart with `./scripts/setup.sh restart`.
 **Container logs not in wrangler tail** — Container stdout is not streamed through
 `wrangler tail`. Use `./scripts/setup.sh container-logs` instead.
 
-**Build fails at tigrisfs** — The FUSE mount binary is fetched during Docker build.
-Check your network and Docker setup. The version is pinned in the Dockerfile.
-
 ## Component Reference
 
 | Component | What it does |
 |---|---|
 | [`obsidian-headless`](https://www.npmjs.com/package/obsidian-headless) | Official Obsidian CLI, syncs vault headlessly |
-| [`tigrisfs`](https://github.com/tigrisdata/tigrisfs) | FUSE adapter, mounts R2 as a local filesystem |
 | [`McpAgent`](https://developers.cloudflare.com/agents/model-context-protocol/mcp-agent-api/) (Agents SDK) | Handles MCP transport, sessions, auth |
 | [`McpServer`](https://github.com/modelcontextprotocol/typescript-sdk) (MCP SDK) | Tool registration, JSON-RPC protocol |
-| [Cloudflare R2](https://developers.cloudflare.com/r2/) | Object storage, shared between Container and Worker |
 | [Cloudflare Containers](https://developers.cloudflare.com/containers/) | Runs the sync process alongside the Worker |

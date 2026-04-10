@@ -3,13 +3,6 @@
 	"main": "src/index.ts",
 	"compatibility_date": "2025-04-01",
 	"compatibility_flags": ["nodejs_compat"],
-	// R2 bucket for vault storage
-	"r2_buckets": [
-		{
-			"binding": "VAULT",
-			"bucket_name": "obsidian-vault"
-		}
-	],
 	// Durable Objects: MCP server + sync container
 	"durable_objects": {
 		"bindings": [

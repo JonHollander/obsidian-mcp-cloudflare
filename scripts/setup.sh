@@ -7,7 +7,6 @@ set -euo pipefail
 # Usage:
 #   ./scripts/setup.sh              # Run full setup
 #   ./scripts/setup.sh secrets      # Only push secrets
-#   ./scripts/setup.sh bucket       # Only create R2 bucket
 #   ./scripts/setup.sh deploy       # Only deploy worker
 #   ./scripts/setup.sh deploy --log # Deploy then tail live logs
 #   ./scripts/setup.sh logs         # Tail live logs only
@@ -36,6 +35,16 @@ set +a
 
 # ── Helpers ─────────────────────────────────────────────────────
 
+auth_curl() {
+  # curl with auth token if set
+  local token="${MCP_AUTH_TOKEN:-}"
+  if [ -n "$token" ]; then
+    curl -s -H "Authorization: Bearer $token" "$@"
+  else
+    curl -s "$@"
+  fi
+}
+
 push_secret() {
   local name="$1"
   local value="${!name:-}"
@@ -49,23 +58,8 @@ push_secret() {
 
 # ── Commands ────────────────────────────────────────────────────
 
-do_bucket() {
-  echo "── Creating R2 bucket ─────────────────────────────────"
-  local bucket="${R2_BUCKET_NAME:-obsidian-vault}"
-  if wrangler r2 bucket list 2>/dev/null | grep -q "$bucket"; then
-    echo "  Bucket '$bucket' already exists"
-  else
-    wrangler r2 bucket create "$bucket"
-    echo "  Created bucket '$bucket'"
-  fi
-}
-
 do_secrets() {
   echo "── Pushing secrets to Cloudflare ──────────────────────"
-  push_secret CLOUDFLARE_ACCOUNT_ID
-  push_secret R2_BUCKET_NAME
-  push_secret R2_ACCESS_KEY_ID
-  push_secret R2_SECRET_ACCESS_KEY
   push_secret OBSIDIAN_EMAIL
   push_secret OBSIDIAN_PASSWORD
   push_secret VAULT_NAME
@@ -105,7 +99,7 @@ do_validate() {
     ok=false
   else
     local missing=()
-    for var in CLOUDFLARE_ACCOUNT_ID R2_BUCKET_NAME OBSIDIAN_EMAIL OBSIDIAN_PASSWORD VAULT_NAME; do
+    for var in OBSIDIAN_EMAIL OBSIDIAN_PASSWORD VAULT_NAME; do
       local val="${!var:-}"
       if [ -z "$val" ] || [[ "$val" == your-* ]]; then
         missing+=("$var")
@@ -141,16 +135,17 @@ do_deploy() {
     return 1
   fi
   WORKER_URL="$worker_url"
+  echo "$worker_url" > "$WORKER_URL_FILE"
 
   echo ""
   echo "── Restarting sync container ──────────────────────────"
   echo "  (wrangler deploy does not restart running containers)"
-  curl -s "${worker_url}/sync/restart" | python3 -m json.tool 2>/dev/null || true
+  auth_curl "${worker_url}/sync/restart" | python3 -m json.tool 2>/dev/null || true
   sleep 5
 
   echo ""
   echo "── Verifying container health ─────────────────────────"
-  curl -s "${worker_url}/sync/status" | python3 -m json.tool 2>/dev/null || echo "  (container starting...)"
+  auth_curl "${worker_url}/sync/status" | python3 -m json.tool 2>/dev/null || echo "  (container starting...)"
 
   echo ""
   echo "════════════════════════════════════════════════════════"
@@ -170,15 +165,19 @@ do_logs() {
 
 # ── Worker URL helper ──────────────────────────────────────────
 
+WORKER_URL_FILE="$PROJECT_DIR/.worker-url"
+
 get_worker_url() {
   if [ -n "${WORKER_URL:-}" ]; then
     echo "$WORKER_URL"
     return
   fi
-  # Derive from worker name in wrangler.jsonc (strip comments before parsing)
-  local name
-  name=$(sed 's|//.*||' "$PROJECT_DIR/wrangler.jsonc" | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])" 2>/dev/null || echo "obsidian-mcp")
-  echo "https://${name}.workers.dev"
+  if [ -f "$WORKER_URL_FILE" ]; then
+    cat "$WORKER_URL_FILE"
+    return
+  fi
+  echo "Error: Worker URL not known. Run './scripts/setup.sh deploy' first." >&2
+  return 1
 }
 
 # ── Container management ───────────────────────────────────────
@@ -187,29 +186,26 @@ do_restart() {
   local url
   url="$(get_worker_url)"
   echo "── Restarting sync container ──────────────────────────"
-  curl -s "${url}/sync/restart" | python3 -m json.tool 2>/dev/null || echo "  Failed to reach ${url}/sync/restart"
+  auth_curl "${url}/sync/restart" | python3 -m json.tool 2>/dev/null || echo "  Failed to reach ${url}/sync/restart"
 }
 
 do_status() {
   local url
   url="$(get_worker_url)"
   echo "── Container status ───────────────────────────────────"
-  curl -s "${url}/sync/status" | python3 -m json.tool 2>/dev/null || echo "  Failed to reach ${url}/sync/status"
+  auth_curl "${url}/sync/status" | python3 -m json.tool 2>/dev/null || echo "  Failed to reach ${url}/sync/status"
 }
 
 do_container_logs() {
   local url
   url="$(get_worker_url)"
   echo "── Container logs ─────────────────────────────────────"
-  curl -s "${url}/sync/logs" || echo "  Failed to reach ${url}/sync/logs"
+  auth_curl "${url}/sync/logs" || echo "  Failed to reach ${url}/sync/logs"
 }
 
 # ── Main ────────────────────────────────────────────────────────
 
 case "${1:-all}" in
-  bucket)
-    do_bucket
-    ;;
   secrets)
     do_secrets
     ;;
@@ -237,15 +233,13 @@ case "${1:-all}" in
   all)
     do_validate
     echo ""
-    do_bucket
-    echo ""
     do_secrets
     echo ""
     do_deploy
     [[ "${2:-}" == "--log" ]] && do_logs
     ;;
   *)
-    echo "Usage: $0 [bucket|secrets|deploy|logs|validate|restart|status|container-logs|all] [--log]"
+    echo "Usage: $0 [secrets|deploy|logs|validate|restart|status|container-logs|all] [--log]"
     exit 1
     ;;
 esac
