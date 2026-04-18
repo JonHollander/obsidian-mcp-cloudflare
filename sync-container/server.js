@@ -20,6 +20,13 @@ function isReady() {
   return fs.existsSync(READY_FLAG);
 }
 
+function syncPhase(logs) {
+  if (isReady()) return "ready";
+  if (logs.includes("Running initial sync pass")) return "initial_sync";
+  if (logs.includes("Obsidian login OK")) return "setup";
+  return "starting";
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -218,6 +225,7 @@ const server = http.createServer(async (req, res) => {
       pid: process.pid,
       uptime: process.uptime(),
       ready: isReady(),
+      phase: syncPhase(logs),
       loginOk: logs.includes("Obsidian login OK"),
       syncRunning: logs.includes("Starting ob sync"),
       lastLines: logs.split("\n").slice(-20),
@@ -239,9 +247,13 @@ const server = http.createServer(async (req, res) => {
   // API endpoints — require readiness
   if (url.pathname.startsWith("/api/")) {
     if (!isReady()) {
+      let logs = "";
+      try { logs = fs.readFileSync(LOG_FILE, "utf8"); } catch {}
       return json(res, 503, {
         error: "vault_initializing",
-        message: "Vault sync is starting up, please retry in a few seconds",
+        phase: syncPhase(logs),
+        retry_after_seconds: 5,
+        message: "Vault is syncing with Obsidian. Retry this tool call in a few seconds.",
       });
     }
 
