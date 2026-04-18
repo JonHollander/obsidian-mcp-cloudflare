@@ -60,7 +60,8 @@ export class ObsidianMCP extends McpAgent<Env> {
 
   private errorText(data: any, fallback: string): string {
     if (data?.error === "vault_initializing") {
-      return "The vault is initializing. Please try again in a moment.";
+      const seconds = data?.retry_after_seconds ?? 5;
+      return `VAULT_SYNCING: The Obsidian vault is still syncing with the cloud after a container wake. Wait ~${seconds} seconds and call this tool again — do not treat this as an empty result.`;
     }
     return data?.error || data?.message || fallback;
   }

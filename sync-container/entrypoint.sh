@@ -39,13 +39,23 @@ if [ ! -d "/vault/.obsidian-headless" ]; then
   echo "[sync] Vault setup OK" | tee -a "$LOG_FILE"
 fi
 
+# ── Initial sync pass (blocks until /vault is populated) ────────
+# Setting the ready flag before the first sync causes list_notes to
+# return an empty vault on cold-start. Do a one-shot pull first.
+echo "[sync] Running initial sync pass" | tee -a "$LOG_FILE"
+cd /vault
+if ob sync >> "$LOG_FILE" 2>&1; then
+  echo "[sync] Initial sync OK" | tee -a "$LOG_FILE"
+else
+  echo "[sync] WARN: Initial sync pass exited non-zero; proceeding anyway" | tee -a "$LOG_FILE"
+fi
+
 # ── Signal readiness ────────────────────────────────────────────
 touch /tmp/vault-ready
 echo "[sync] Vault ready — API now serving requests" | tee -a "$LOG_FILE"
 
 # ── Run continuous sync ─────────────────────────────────────────
 echo "[sync] Starting ob sync --continuous" | tee -a "$LOG_FILE"
-cd /vault
 ob sync --continuous >> "$LOG_FILE" 2>&1
 echo "[sync] ob sync exited with code $?" | tee -a "$LOG_FILE"
 
