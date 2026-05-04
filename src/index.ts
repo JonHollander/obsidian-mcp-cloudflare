@@ -69,10 +69,40 @@ export class ObsidianMCP extends McpAgent<Env> {
     // ── List all notes ────────────────────────────────────────
     this.server.tool(
       "list_notes",
-      "List all markdown notes in the vault with paths and sizes",
-      {},
-      async () => {
-        const { status, data } = await this.containerJson("GET", "/api/notes");
+      "List markdown notes in the vault. Supports pagination, prefix filtering, and incremental listing via updated_since.",
+      {
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .max(10000)
+          .default(1000)
+          .describe("Max notes to return (default 1000, max 10000)."),
+        cursor: z
+          .number()
+          .int()
+          .nonnegative()
+          .default(0)
+          .describe("Offset cursor from a previous response's next_cursor."),
+        prefix: z
+          .string()
+          .default("")
+          .describe("Only return notes whose path starts with this prefix, e.g. 'projects/'."),
+        updated_since: z
+          .string()
+          .optional()
+          .describe("ISO timestamp; only return notes modified at or after this time."),
+      },
+      async ({ limit, cursor, prefix, updated_since }) => {
+        const qs = new URLSearchParams();
+        qs.set("limit", String(limit));
+        qs.set("cursor", String(cursor));
+        if (prefix) qs.set("prefix", prefix);
+        if (updated_since) qs.set("updated_since", updated_since);
+        const { status, data } = await this.containerJson(
+          "GET",
+          `/api/notes?${qs.toString()}`
+        );
         if (status !== 200) {
           return {
             content: [{ type: "text", text: this.errorText(data, "Failed to list notes") }],
@@ -87,12 +117,30 @@ export class ObsidianMCP extends McpAgent<Env> {
     // ── Read a note ───────────────────────────────────────────
     this.server.tool(
       "read_note",
-      "Read the full content of a note by its path",
-      { path: z.string().describe("Path to the note, e.g. 'projects/zoetrope.md'") },
-      async ({ path }) => {
+      "Read a note by path. For very large notes, use offset/max_bytes to page through content (response includes truncated/total_size).",
+      {
+        path: z.string().describe("Path to the note, e.g. 'projects/zoetrope.md'"),
+        offset: z
+          .number()
+          .int()
+          .nonnegative()
+          .default(0)
+          .describe("Byte offset to start reading from (default 0)."),
+        max_bytes: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Max bytes to return. Defaults to the server's configured cap."),
+      },
+      async ({ path, offset, max_bytes }) => {
+        const qs = new URLSearchParams();
+        qs.set("path", path);
+        if (offset) qs.set("offset", String(offset));
+        if (max_bytes) qs.set("max_bytes", String(max_bytes));
         const { status, data } = await this.containerJson(
           "GET",
-          `/api/notes?path=${encodeURIComponent(path)}`
+          `/api/notes?${qs.toString()}`
         );
         if (status === 404) {
           return { content: [{ type: "text", text: `Note not found: ${path}` }] };
@@ -102,6 +150,12 @@ export class ObsidianMCP extends McpAgent<Env> {
             content: [{ type: "text", text: this.errorText(data, "Failed to read note") }],
           };
         }
+        if (data.truncated) {
+          const header =
+            `[truncated: returned ${data.returned_bytes} of ${data.total_size} bytes ` +
+            `from offset ${data.offset}. Call read_note again with offset=${data.offset + data.returned_bytes} for more.]\n\n`;
+          return { content: [{ type: "text", text: header + data.content }] };
+        }
         return { content: [{ type: "text", text: data.content }] };
       }
     );
@@ -109,26 +163,39 @@ export class ObsidianMCP extends McpAgent<Env> {
     // ── Full-text search ──────────────────────────────────────
     this.server.tool(
       "search_notes",
-      "Search across all notes for a text query. Returns matching file paths and snippets.",
-      { query: z.string().describe("Search term (case-insensitive)") },
-      async ({ query }) => {
+      "Search across all notes for a text query. Returns matching paths and snippets, sorted by recency.",
+      {
+        query: z.string().describe("Search term (case-insensitive)"),
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .max(200)
+          .default(20)
+          .describe("Max results to return (default 20, max 200)."),
+      },
+      async ({ query, limit }) => {
         const { status, data } = await this.containerJson(
           "POST",
           "/api/search",
-          { query }
+          { query, limit }
         );
         if (status !== 200) {
           return {
             content: [{ type: "text", text: this.errorText(data, "Search failed") }],
           };
         }
-        if (!data.length) {
+        const results: Array<{ path: string; snippet: string }> = data.results || [];
+        if (!results.length) {
           return { content: [{ type: "text", text: "No results found." }] };
         }
-        const formatted = data
-          .map((r: { path: string; snippet: string }) => `**${r.path}**\n...${r.snippet}...`)
+        const formatted = results
+          .map((r) => `**${r.path}**\n...${r.snippet}...`)
           .join("\n\n---\n\n");
-        return { content: [{ type: "text", text: formatted }] };
+        const footer = data.truncated
+          ? `\n\n---\n\n_Showing ${results.length} of more matches. Increase \`limit\` (max 200) or refine the query._`
+          : "";
+        return { content: [{ type: "text", text: formatted + footer }] };
       }
     );
 

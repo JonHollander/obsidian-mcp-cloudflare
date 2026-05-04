@@ -36,9 +36,9 @@ all MCP tool calls to the Container's API.
 
 | Tool | Description |
 |------|-------------|
-| `list_notes` | List all markdown notes with paths, sizes, and dates |
-| `read_note` | Read the full content of a note by path |
-| `search_notes` | Full-text search across all notes with snippets |
+| `list_notes` | List markdown notes with paths, sizes, dates. Supports `limit`, `cursor`, `prefix`, `updated_since`. |
+| `read_note` | Read a note by path. Supports `offset` / `max_bytes` for paging through large notes. |
+| `search_notes` | Full-text search across all notes with snippets. Supports `limit` (default 20). |
 | `write_note` | Create or overwrite a note |
 | `append_to_note` | Append to an existing note (or create it) |
 | `delete_note` | Delete a note |
@@ -235,10 +235,24 @@ The `ob` sqlite state file lives on ephemeral container disk. A restart triggers
 a full re-sync. To fix: add a SIGTERM trap in `entrypoint.sh` that persists the
 state file, and restore it on startup.
 
+### Response & Result Limits
+
+The container caps payload sizes to keep things responsive on large vaults.
+Defaults can be overridden by setting environment variables on the container
+(via `wrangler.jsonc` `vars` or per-container env):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MAX_BODY_BYTES` | `10485760` (10 MB) | Max accepted request body (returns 413 if exceeded). |
+| `MAX_NOTE_BYTES` | `5242880` (5 MB) | Max bytes returned by `read_note`; clients page with `offset`. |
+| `DEFAULT_LIST_LIMIT` / `MAX_LIST_LIMIT` | `1000` / `10000` | `list_notes` page size. |
+| `DEFAULT_SEARCH_LIMIT` / `MAX_SEARCH_LIMIT` | `20` / `200` | `search_notes` result cap. |
+
 ### Search Performance
 
-The brute-force search reads every `.md` file per query — fine for <500 files.
-For larger vaults, build a search index in [D1](https://developers.cloudflare.com/d1/)
+`search_notes` reads every `.md` file per query — fine for vaults up to a few
+thousand notes, especially with the result cap above. For larger vaults,
+build a search index in [D1](https://developers.cloudflare.com/d1/)
 or [Workers KV](https://developers.cloudflare.com/kv/).
 
 ### Attachments
