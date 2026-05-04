@@ -363,19 +363,43 @@ export class ObsidianSync extends Container<Env> {
 
 // ── Fetch handler ───────────────────────────────────────────────
 
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let r = 0;
+  for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return r === 0;
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
-    // Optional auth: Bearer header or ?token= query param
-    if (env.MCP_AUTH_TOKEN) {
-      const auth = request.headers.get("Authorization");
-      // Extract token from raw query to avoid + being decoded as space
-      const rawToken = url.search.match(/[?&]token=([^&]*)/)?.[1];
-      const urlToken = rawToken ? decodeURIComponent(rawToken) : null;
-      if (auth !== `Bearer ${env.MCP_AUTH_TOKEN}` && urlToken !== env.MCP_AUTH_TOKEN) {
-        return new Response("Unauthorized", { status: 401 });
-      }
+    // Fail closed: refuse to serve if no auth token is configured.
+    const expected = env.MCP_AUTH_TOKEN;
+    if (!expected || expected.length < 16) {
+      return new Response(
+        "Server misconfigured: MCP_AUTH_TOKEN secret is missing or too short " +
+          "(min 16 chars). Refusing to serve. See README for setup.",
+        { status: 503 }
+      );
+    }
+
+    // Auth: Bearer header (preferred) or ?token= query param.
+    // Query-string tokens are convenient for clients that can't set headers,
+    // but they end up in access logs and browser history — prefer headers.
+    const authHeader = request.headers.get("Authorization") || "";
+    const headerToken = authHeader.startsWith("Bearer ")
+      ? authHeader.slice(7)
+      : "";
+    // Extract from raw query so '+' is not decoded as space.
+    const rawToken = url.search.match(/[?&]token=([^&]*)/)?.[1];
+    const urlToken = rawToken ? decodeURIComponent(rawToken) : "";
+
+    if (
+      !timingSafeEqual(headerToken, expected) &&
+      !timingSafeEqual(urlToken, expected)
+    ) {
+      return new Response("Unauthorized", { status: 401 });
     }
 
     // Sync container endpoints

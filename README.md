@@ -201,9 +201,20 @@ These are left as exercises to harden the setup for your needs:
 
 ### Auth Hardening
 
-The included auth (`MCP_AUTH_TOKEN` secret) supports both `Authorization: Bearer`
-headers and `?token=` query params. The URL token approach is convenient for
-Claude.ai connectors where custom headers aren't always available.
+The included auth (`MCP_AUTH_TOKEN` secret) is **required** — the worker
+returns 503 if it is unset or shorter than 16 characters. It supports both
+`Authorization: Bearer` headers (preferred) and `?token=` query params.
+The URL token approach is convenient for Claude.ai connectors where custom
+headers aren't always available, but be aware: query-string tokens are
+recorded in Cloudflare access logs, browser history, and `Referer` headers.
+Prefer the header form when your client supports it, and rotate the token
+periodically.
+
+Generate a strong token with:
+
+```bash
+openssl rand -hex 32
+```
 
 For shared or public deployments, consider stronger options:
 
@@ -232,8 +243,13 @@ or [Workers KV](https://developers.cloudflare.com/kv/).
 
 ### Attachments
 
-Currently filters to `.md` only. Extend to support images, PDFs, and other
-vault attachments with additional tools.
+Currently filters to `.md` only — and the container also rejects writes,
+appends, and deletes for any non-`.md` path, plus any path inside
+`.obsidian/`, `.obsidian-*/`, or `.trash/`. This prevents a misbehaving
+client from overwriting Obsidian config or community plugins (which would
+let an attacker run code on your desktop the next time you open the vault).
+To support additional file types, relax this guard deliberately and add
+new tools.
 
 ## Troubleshooting
 

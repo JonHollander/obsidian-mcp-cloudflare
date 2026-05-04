@@ -18,7 +18,9 @@ VAULT_NAME=your-vault-name
 # Leave empty if your vault does NOT use end-to-end encryption.
 VAULT_PASSWORD=
 
-# ── MCP Auth (optional) ────────────────────────────────────────
+# ── MCP Auth (REQUIRED) ────────────────────────────────────────
 # Token for authenticating MCP clients (supports both Bearer header
-# and ?token= URL param). Leave empty for unauthenticated access.
+# and ?token= URL param). Must be at least 16 characters.
+# The worker fails closed (503) if this is missing.
+# Generate one with: openssl rand -hex 32
 MCP_AUTH_TOKEN=

@@ -6,14 +6,33 @@ const VAULT_DIR = process.env.VAULT_DIR || "/vault";
 const LOG_FILE = process.env.LOG_FILE || "/tmp/sync.log";
 const READY_FLAG = process.env.READY_FLAG || "/tmp/vault-ready";
 const PORT = parseInt(process.env.PORT || "8080", 10);
+const MAX_BODY_BYTES = parseInt(
+  process.env.MAX_BODY_BYTES || String(10 * 1024 * 1024),
+  10
+);
 
 // ── Path helpers ───────────────────────────────────────────────
 
+// Segments that must never be touched: Obsidian metadata (plugins execute
+// code when the vault opens, so writes here are RCE on the user's desktop)
+// and the trash folder.
+function isReservedSegment(seg) {
+  return seg === ".obsidian" || seg.startsWith(".obsidian-") || seg === ".trash";
+}
+
 function safePath(userPath) {
-  if (!userPath) return null;
+  if (typeof userPath !== "string" || !userPath) return null;
+  // Reject NUL and other control characters.
+  if (/[\x00-\x1f]/.test(userPath)) return null;
   const resolved = path.resolve(VAULT_DIR, userPath);
   if (!resolved.startsWith(VAULT_DIR + "/") && resolved !== VAULT_DIR) return null;
+  const rel = path.relative(VAULT_DIR, resolved);
+  if (rel && rel.split(path.sep).some(isReservedSegment)) return null;
   return resolved;
+}
+
+function isMarkdownPath(p) {
+  return typeof p === "string" && /\.md$/i.test(p);
 }
 
 function isReady() {
@@ -23,16 +42,43 @@ function isReady() {
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on("data", (c) => chunks.push(c));
+    let total = 0;
+    let aborted = false;
+    req.on("data", (c) => {
+      if (aborted) return;
+      total += c.length;
+      if (total > MAX_BODY_BYTES) {
+        aborted = true;
+        const err = new Error("Request body too large");
+        err.statusCode = 413;
+        req.destroy();
+        reject(err);
+        return;
+      }
+      chunks.push(c);
+    });
     req.on("end", () => {
+      if (aborted) return;
       try {
         resolve(JSON.parse(Buffer.concat(chunks).toString()));
       } catch {
         resolve({});
       }
     });
-    req.on("error", reject);
+    req.on("error", (e) => {
+      if (!aborted) reject(e);
+    });
   });
+}
+
+async function readBodyOrError(req, res) {
+  try {
+    return { body: await readBody(req) };
+  } catch (e) {
+    const status = e && e.statusCode === 413 ? 413 : 400;
+    json(res, status, { error: e.message || "Bad request" });
+    return { failed: true };
+  }
 }
 
 function json(res, status, data) {
@@ -80,6 +126,9 @@ async function handleNotes(req, res, url) {
 
   const full = safePath(notePath);
   if (!full) return json(res, 400, { error: "Invalid path" });
+  if (!isMarkdownPath(notePath)) {
+    return json(res, 400, { error: "Path must end in .md" });
+  }
 
   // GET /api/notes?path=x — read note
   if (req.method === "GET") {
@@ -93,22 +142,24 @@ async function handleNotes(req, res, url) {
 
   // PUT /api/notes?path=x — write/overwrite note
   if (req.method === "PUT") {
-    const body = await readBody(req);
-    if (typeof body.content !== "string")
+    const r = await readBodyOrError(req, res);
+    if (r.failed) return;
+    if (typeof r.body.content !== "string")
       return json(res, 400, { error: "Missing content" });
     fs.mkdirSync(path.dirname(full), { recursive: true });
-    fs.writeFileSync(full, body.content);
+    fs.writeFileSync(full, r.body.content);
     return json(res, 200, { ok: true, path: notePath });
   }
 
   // PATCH /api/notes?path=x — append to note
   if (req.method === "PATCH") {
-    const body = await readBody(req);
-    if (typeof body.content !== "string")
+    const r = await readBodyOrError(req, res);
+    if (r.failed) return;
+    if (typeof r.body.content !== "string")
       return json(res, 400, { error: "Missing content" });
     fs.mkdirSync(path.dirname(full), { recursive: true });
     const prev = fs.existsSync(full) ? fs.readFileSync(full, "utf8") : "";
-    fs.writeFileSync(full, prev + "\n" + body.content);
+    fs.writeFileSync(full, prev + "\n" + r.body.content);
     return json(res, 200, { ok: true, path: notePath });
   }
 
@@ -127,7 +178,9 @@ async function handleNotes(req, res, url) {
 
 async function handleSearch(req, res) {
   if (req.method !== "POST") return json(res, 405, { error: "Method not allowed" });
-  const body = await readBody(req);
+  const r = await readBodyOrError(req, res);
+  if (r.failed) return;
+  const body = r.body;
   if (!body.query) return json(res, 400, { error: "Missing query" });
 
   const q = body.query.toLowerCase();
