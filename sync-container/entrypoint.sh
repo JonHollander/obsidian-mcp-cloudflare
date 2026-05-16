@@ -5,7 +5,7 @@ touch "$LOG_FILE"
 echo "[sync] Container starting — pid $$" | tee -a "$LOG_FILE"
 
 # ── HTTP API server on :8080 ────────────────────────────────────
-node /server.js >> "$LOG_FILE" 2>&1 &
+node /app/server.js >> "$LOG_FILE" 2>&1 &
 API_PID=$!
 
 # ── Authenticate with Obsidian ──────────────────────────────────

@@ -1,5 +1,6 @@
 const http = require("http");
 const fs = require("fs/promises");
+const fsSync = require("fs");
 const path = require("path");
 
 const VAULT_DIR = process.env.VAULT_DIR || "/vault";
@@ -104,6 +105,307 @@ function json(res, status, data) {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(data));
 }
+
+// ── Search index (optional, opt-in via SEARCH_INDEX_ENABLED=true) ──────
+
+const INDEX_ENABLED = process.env.SEARCH_INDEX_ENABLED === "true";
+const INDEX_DB_PATH = process.env.INDEX_DB_PATH || "/tmp/index.sqlite";
+const INDEX_SWEEP_INTERVAL_MS = parseInt(
+  process.env.INDEX_SWEEP_INTERVAL_MS || "30000",
+  10
+);
+const INDEX_DEBOUNCE_MS = parseInt(process.env.INDEX_DEBOUNCE_MS || "250", 10);
+const INDEX_SCHEMA_VERSION = "1";
+
+function indexLog(...args) {
+  console.log("[index]", ...args);
+}
+
+const indexer = {
+  enabled: INDEX_ENABLED,
+  db: null,
+  ready: false,
+  bulkInProgress: false,
+  pending: new Map(),
+  watcher: null,
+  sweepTimer: null,
+
+  init() {
+    if (!this.enabled) {
+      indexLog("disabled (set SEARCH_INDEX_ENABLED=true to enable)");
+      return false;
+    }
+    let Database;
+    try {
+      Database = require("better-sqlite3");
+    } catch (e) {
+      indexLog("better-sqlite3 not available, falling back to brute force:", e.message);
+      this.enabled = false;
+      return false;
+    }
+    try {
+      this.db = new Database(INDEX_DB_PATH);
+      this.db.pragma("journal_mode = WAL");
+      this.db.pragma("synchronous = NORMAL");
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS files (
+          path  TEXT PRIMARY KEY,
+          size  INTEGER NOT NULL,
+          mtime INTEGER NOT NULL
+        );
+        CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
+          path UNINDEXED,
+          content,
+          tokenize = 'unicode61 remove_diacritics 2'
+        );
+        CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+      `);
+      const row = this.db
+        .prepare("SELECT value FROM meta WHERE key = 'schema_version'")
+        .get();
+      if (row && row.value !== INDEX_SCHEMA_VERSION) {
+        indexLog(`schema mismatch (${row.value} != ${INDEX_SCHEMA_VERSION}), wiping`);
+        this.db.exec("DELETE FROM files; DELETE FROM notes_fts;");
+      }
+      this.db
+        .prepare(
+          "INSERT INTO meta(key, value) VALUES('schema_version', ?) " +
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        )
+        .run(INDEX_SCHEMA_VERSION);
+      indexLog(`opened ${INDEX_DB_PATH}`);
+      return true;
+    } catch (e) {
+      indexLog("init failed:", e.message);
+      this.db = null;
+      this.enabled = false;
+      return false;
+    }
+  },
+
+  // Used by the live-update paths (synchronous fs.watch and the note write
+  // handlers). Reads the file from disk and replaces its index row.
+  async upsert(relPath) {
+    if (!this.db) return;
+    const full = path.join(VAULT_DIR, relPath);
+    try {
+      const stat = await fs.stat(full);
+      if (!stat.isFile()) {
+        this.remove(relPath);
+        return;
+      }
+      const content = await fs.readFile(full, "utf8");
+      const tx = this.db.transaction((p, s, m, c) => {
+        this.db
+          .prepare(
+            "INSERT INTO files(path, size, mtime) VALUES(?, ?, ?) " +
+              "ON CONFLICT(path) DO UPDATE SET size = excluded.size, mtime = excluded.mtime"
+          )
+          .run(p, s, m);
+        this.db.prepare("DELETE FROM notes_fts WHERE path = ?").run(p);
+        this.db
+          .prepare("INSERT INTO notes_fts(path, content) VALUES(?, ?)")
+          .run(p, c);
+      });
+      tx(relPath, stat.size, stat.mtime.getTime(), content);
+    } catch {
+      // File vanished or unreadable — make sure no stale row remains.
+      this.remove(relPath);
+    }
+  },
+
+  remove(relPath) {
+    if (!this.db) return;
+    try {
+      const tx = this.db.transaction((p) => {
+        this.db.prepare("DELETE FROM files WHERE path = ?").run(p);
+        this.db.prepare("DELETE FROM notes_fts WHERE path = ?").run(p);
+      });
+      tx(relPath);
+    } catch (e) {
+      indexLog("remove failed:", relPath, e.message);
+    }
+  },
+
+  // Bulk-rebuild after the readiness flag flips. Reads files in chunks and
+  // yields between chunks so the event loop isn't starved.
+  async bulkReindex() {
+    if (!this.db || this.bulkInProgress) return;
+    this.bulkInProgress = true;
+    const start = Date.now();
+    indexLog("bulk reindex starting");
+    try {
+      const files = await walkMd(VAULT_DIR, VAULT_DIR);
+      this.db.exec("DELETE FROM files; DELETE FROM notes_fts;");
+
+      const insertFile = this.db.prepare(
+        "INSERT INTO files(path, size, mtime) VALUES(?, ?, ?)"
+      );
+      const insertFts = this.db.prepare(
+        "INSERT INTO notes_fts(path, content) VALUES(?, ?)"
+      );
+
+      const CHUNK = 100;
+      let inserted = 0;
+      for (let i = 0; i < files.length; i += CHUNK) {
+        const slice = files.slice(i, i + CHUNK);
+        const reads = await Promise.all(
+          slice.map(async (f) => {
+            try {
+              const content = await fs.readFile(
+                path.join(VAULT_DIR, f.path),
+                "utf8"
+              );
+              return { ...f, content };
+            } catch {
+              return null;
+            }
+          })
+        );
+        const tx = this.db.transaction((batch) => {
+          for (const f of batch) {
+            if (!f) continue;
+            insertFile.run(f.path, f.size, new Date(f.modified).getTime());
+            insertFts.run(f.path, f.content);
+            inserted++;
+          }
+        });
+        tx(reads);
+        // Yield to the event loop between chunks.
+        await new Promise((r) => setImmediate(r));
+      }
+      this.ready = true;
+      indexLog(`bulk reindex done: ${inserted} files in ${Date.now() - start} ms`);
+    } catch (e) {
+      indexLog("bulk reindex failed:", e.message);
+    } finally {
+      this.bulkInProgress = false;
+    }
+  },
+
+  // Debounced fs.watch handler — coalesces atomic-rename event bursts.
+  scheduleWatchEvent(filename) {
+    if (!this.db || !filename) return;
+    const rel = filename;
+    if (rel.split(path.sep).some(isReservedSegment)) return;
+    if (!rel.toLowerCase().endsWith(".md")) return;
+    const prev = this.pending.get(rel);
+    if (prev) clearTimeout(prev);
+    const t = setTimeout(() => {
+      this.pending.delete(rel);
+      this.upsert(rel).catch((e) =>
+        indexLog("watch upsert failed:", rel, e.message)
+      );
+    }, INDEX_DEBOUNCE_MS);
+    this.pending.set(rel, t);
+  },
+
+  startWatcher() {
+    if (!this.db) return;
+    try {
+      this.watcher = fsSync.watch(
+        VAULT_DIR,
+        { recursive: true },
+        (_event, filename) => this.scheduleWatchEvent(filename)
+      );
+      indexLog(`fs.watch started on ${VAULT_DIR}`);
+    } catch (e) {
+      indexLog("fs.watch unavailable, relying on periodic sweep:", e.message);
+    }
+  },
+
+  // Safety net: reconcile index against disk. Cheap when nothing changed —
+  // only re-reads files whose mtime moved.
+  async sweep() {
+    if (!this.db || !this.ready) return;
+    const start = Date.now();
+    try {
+      const files = await walkMd(VAULT_DIR, VAULT_DIR);
+      const onDisk = new Map();
+      for (const f of files) {
+        onDisk.set(f.path, new Date(f.modified).getTime());
+      }
+      const indexed = new Map();
+      for (const row of this.db.prepare("SELECT path, mtime FROM files").all()) {
+        indexed.set(row.path, row.mtime);
+      }
+      let updated = 0;
+      let removed = 0;
+      for (const [p, mtimeMs] of onDisk) {
+        const idx = indexed.get(p);
+        if (idx === undefined || idx < mtimeMs) {
+          await this.upsert(p);
+          updated++;
+        }
+      }
+      for (const p of indexed.keys()) {
+        if (!onDisk.has(p)) {
+          this.remove(p);
+          removed++;
+        }
+      }
+      if (updated || removed) {
+        indexLog(
+          `sweep: updated=${updated} removed=${removed} in ${Date.now() - start} ms`
+        );
+      }
+    } catch (e) {
+      indexLog("sweep failed:", e.message);
+    }
+  },
+
+  startSweep() {
+    if (!this.db) return;
+    this.sweepTimer = setInterval(
+      () => this.sweep(),
+      INDEX_SWEEP_INTERVAL_MS
+    );
+    // Don't keep the process alive on this timer alone.
+    if (this.sweepTimer.unref) this.sweepTimer.unref();
+  },
+
+  buildFtsQuery(input) {
+    // Strip every FTS5 operator so the model can't escape into query syntax.
+    const cleaned = String(input).replace(/["*():\-\\^~]/g, " ").trim();
+    if (!cleaned) return null;
+    const tokens = cleaned.split(/\s+/).filter(Boolean);
+    if (!tokens.length) return null;
+    return tokens
+      .map((t, i) => (i === tokens.length - 1 ? `"${t}"*` : `"${t}"`))
+      .join(" ");
+  },
+
+  search(query, limit) {
+    if (!this.db || !this.ready) return null;
+    const fts = this.buildFtsQuery(query);
+    if (!fts) {
+      return { results: [], total_scanned: 0, total_files: 0, truncated: false };
+    }
+    try {
+      const rows = this.db
+        .prepare(
+          `SELECT path, snippet(notes_fts, 1, '', '', '...', 16) AS snippet
+           FROM notes_fts
+           WHERE notes_fts MATCH ?
+           ORDER BY bm25(notes_fts)
+           LIMIT ?`
+        )
+        .all(fts, limit + 1);
+      const truncated = rows.length > limit;
+      const sliced = rows.slice(0, limit);
+      const total = this.db.prepare("SELECT COUNT(*) AS c FROM files").get().c;
+      return {
+        results: sliced,
+        total_scanned: total,
+        total_files: total,
+        truncated,
+      };
+    } catch (e) {
+      indexLog("fts query failed:", e.message);
+      return null;
+    }
+  },
+};
 
 // ── Recursive file walk ────────────────────────────────────────
 
@@ -232,6 +534,7 @@ async function handleNotes(req, res, url) {
       return json(res, 400, { error: "Missing content" });
     await fs.mkdir(path.dirname(full), { recursive: true });
     await fs.writeFile(full, r.body.content);
+    await indexer.upsert(notePath);
     return json(res, 200, { ok: true, path: notePath });
   }
 
@@ -249,12 +552,14 @@ async function handleNotes(req, res, url) {
       // file doesn't exist — appendFile will create it, no separator needed
     }
     await fs.appendFile(full, separator + r.body.content);
+    await indexer.upsert(notePath);
     return json(res, 200, { ok: true, path: notePath });
   }
 
   if (req.method === "DELETE") {
     try {
       await fs.unlink(full);
+      indexer.remove(notePath);
       return json(res, 200, { ok: true, path: notePath });
     } catch {
       return json(res, 404, { error: "Note not found" });
@@ -264,19 +569,12 @@ async function handleNotes(req, res, url) {
   return json(res, 405, { error: "Method not allowed" });
 }
 
-async function handleSearch(req, res) {
-  if (req.method !== "POST") return json(res, 405, { error: "Method not allowed" });
-  const r = await readBodyOrError(req, res);
-  if (r.failed) return;
-  const body = r.body;
-  if (typeof body.query !== "string" || !body.query) {
-    return json(res, 400, { error: "Missing query" });
-  }
-
-  const limit = clampInt(body.limit, DEFAULT_SEARCH_LIMIT, 1, MAX_SEARCH_LIMIT);
-  const q = body.query.toLowerCase();
+async function bruteForceSearch(query, limit) {
+  const q = query.toLowerCase();
   const files = await walkMd(VAULT_DIR, VAULT_DIR);
-  files.sort((a, b) => (a.modified < b.modified ? 1 : a.modified > b.modified ? -1 : 0));
+  files.sort((a, b) =>
+    a.modified < b.modified ? 1 : a.modified > b.modified ? -1 : 0
+  );
 
   const results = [];
   let scanned = 0;
@@ -302,12 +600,32 @@ async function handleSearch(req, res) {
     }
   }
 
-  return json(res, 200, {
+  return {
     results,
     total_scanned: scanned,
     total_files: files.length,
     truncated,
-  });
+  };
+}
+
+async function handleSearch(req, res) {
+  if (req.method !== "POST") return json(res, 405, { error: "Method not allowed" });
+  const r = await readBodyOrError(req, res);
+  if (r.failed) return;
+  const body = r.body;
+  if (typeof body.query !== "string" || !body.query) {
+    return json(res, 400, { error: "Missing query" });
+  }
+
+  const limit = clampInt(body.limit, DEFAULT_SEARCH_LIMIT, 1, MAX_SEARCH_LIMIT);
+
+  // FTS5 path when index is opt-in, opened, and bulk-built.
+  if (indexer.enabled && indexer.ready) {
+    const fts = indexer.search(body.query, limit);
+    if (fts) return json(res, 200, fts);
+  }
+
+  return json(res, 200, await bruteForceSearch(body.query, limit));
 }
 
 async function handleFolders(req, res, url) {
@@ -357,7 +675,11 @@ async function handleFolders(req, res, url) {
           });
         }
       }
+      // Capture .md descendants before rm so we can drop their index rows.
+      const indexedChildren =
+        indexer.enabled && indexer.db ? await walkMd(full, VAULT_DIR) : [];
       await fs.rm(full, { recursive: true });
+      for (const child of indexedChildren) indexer.remove(child.path);
       return json(res, 200, { ok: true, path: folderPath });
     } catch (e) {
       return json(res, 500, { error: e.message });
@@ -430,3 +752,24 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`[server] API listening on :${PORT}`);
 });
+
+// ── Indexer bootstrap ──────────────────────────────────────────
+// Open the DB up front so opt-in deployments fail fast on misconfig.
+// Then poll for vault readiness and kick off the one-shot bulk reindex,
+// followed by the fs.watch and periodic sweep loops.
+
+(function bootstrapIndexer() {
+  if (!indexer.init()) return;
+  let startedBulk = false;
+  const poll = setInterval(async () => {
+    if (startedBulk) return;
+    if (!(await isReady())) return;
+    startedBulk = true;
+    clearInterval(poll);
+    indexer.startWatcher();
+    await indexer.bulkReindex();
+    indexer.startSweep();
+  }, 1000);
+  if (poll.unref) poll.unref();
+})();
+

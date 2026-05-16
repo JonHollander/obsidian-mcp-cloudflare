@@ -24,3 +24,11 @@ VAULT_PASSWORD=
 # The worker fails closed (503) if this is missing.
 # Generate one with: openssl rand -hex 32
 MCP_AUTH_TOKEN=
+
+# ── Search Index (optional) ────────────────────────────────────
+# Set to "true" to enable the SQLite FTS5 search index inside the
+# sync container. Default is disabled (brute-force scan). Recommended
+# for vaults with more than a few thousand notes.
+# See README "Search Performance" for tradeoffs (token+prefix match
+# semantics, cold-start rebuild cost).
+SEARCH_INDEX_ENABLED=

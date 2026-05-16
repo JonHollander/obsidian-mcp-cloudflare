@@ -14,6 +14,7 @@ interface Env {
   OBSIDIAN_PASSWORD: string;
   VAULT_NAME: string;
   VAULT_PASSWORD: string;
+  SEARCH_INDEX_ENABLED: string;
 }
 
 // ── MCP Server ──────────────────────────────────────────────────
@@ -403,6 +404,8 @@ export class ObsidianSync extends Container<Env> {
     OBSIDIAN_PASSWORD: (this.env as unknown as Env).OBSIDIAN_PASSWORD,
     VAULT_NAME: (this.env as unknown as Env).VAULT_NAME,
     VAULT_PASSWORD: (this.env as unknown as Env).VAULT_PASSWORD,
+    SEARCH_INDEX_ENABLED:
+      (this.env as unknown as Env).SEARCH_INDEX_ENABLED || "",
   };
 
   override async fetch(request: Request): Promise<Response> {

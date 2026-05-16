@@ -250,10 +250,37 @@ Defaults can be overridden by setting environment variables on the container
 
 ### Search Performance
 
-`search_notes` reads every `.md` file per query — fine for vaults up to a few
-thousand notes, especially with the result cap above. For larger vaults,
-build a search index in [D1](https://developers.cloudflare.com/d1/)
-or [Workers KV](https://developers.cloudflare.com/kv/).
+By default `search_notes` reads every `.md` file per query — fine for vaults
+up to a few thousand notes, especially with the result cap above. For larger
+vaults, enable the built-in SQLite FTS5 index by setting
+`SEARCH_INDEX_ENABLED=true` in `.dev.vars` and redeploying:
+
+```bash
+echo "SEARCH_INDEX_ENABLED=true" >> .dev.vars
+./scripts/setup.sh secrets
+./scripts/setup.sh restart
+```
+
+When enabled the container builds an FTS5 index at `/tmp/index.sqlite` after
+the vault is ready, then keeps it in sync via `fs.watch` plus a 30-second
+mtime safety sweep. Search semantics change slightly:
+
+- Queries are tokenized on whitespace and the **last token gets a prefix
+  match** (`obs` matches `obsidian`); earlier tokens are exact-word matches.
+- Results are ranked by BM25 relevance instead of file recency.
+- FTS5 operator syntax in the query is stripped — the model can't escape
+  into raw FTS expressions.
+
+The index is rebuilt on every cold start (no persistence across container
+restarts; the vault itself is also ephemeral and re-syncs on cold start, so
+the rebuild happens in parallel with `ob sync` and is dominated by it). If
+the index ever fails to open, or while the bulk build is still running,
+search transparently falls back to the brute-force scan.
+
+To revert to the brute-force scan, either set `SEARCH_INDEX_ENABLED=false` in
+`.dev.vars` and re-push secrets, or remove the secret entirely with
+`wrangler secret delete SEARCH_INDEX_ENABLED --name obsidian-mcp`. Then
+`./scripts/setup.sh restart`.
 
 ### Attachments
 

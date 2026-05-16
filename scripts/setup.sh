@@ -65,6 +65,7 @@ do_secrets() {
   push_secret VAULT_NAME
   push_secret VAULT_PASSWORD
   push_secret MCP_AUTH_TOKEN
+  push_secret SEARCH_INDEX_ENABLED
 }
 
 do_validate() {
