@@ -14,6 +14,7 @@ interface Env {
   OBSIDIAN_PASSWORD: string;
   VAULT_NAME: string;
   VAULT_PASSWORD: string;
+  SEARCH_INDEX_ENABLED: string;
 }
 
 // ── MCP Server ──────────────────────────────────────────────────
@@ -69,10 +70,40 @@ export class ObsidianMCP extends McpAgent<Env> {
     // ── List all notes ────────────────────────────────────────
     this.server.tool(
       "list_notes",
-      "List all markdown notes in the vault with paths and sizes",
-      {},
-      async () => {
-        const { status, data } = await this.containerJson("GET", "/api/notes");
+      "List markdown notes in the vault. Supports pagination, prefix filtering, and incremental listing via updated_since.",
+      {
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .max(10000)
+          .default(1000)
+          .describe("Max notes to return (default 1000, max 10000)."),
+        cursor: z
+          .number()
+          .int()
+          .nonnegative()
+          .default(0)
+          .describe("Offset cursor from a previous response's next_cursor."),
+        prefix: z
+          .string()
+          .default("")
+          .describe("Only return notes whose path starts with this prefix, e.g. 'projects/'."),
+        updated_since: z
+          .string()
+          .optional()
+          .describe("ISO timestamp; only return notes modified at or after this time."),
+      },
+      async ({ limit, cursor, prefix, updated_since }) => {
+        const qs = new URLSearchParams();
+        qs.set("limit", String(limit));
+        qs.set("cursor", String(cursor));
+        if (prefix) qs.set("prefix", prefix);
+        if (updated_since) qs.set("updated_since", updated_since);
+        const { status, data } = await this.containerJson(
+          "GET",
+          `/api/notes?${qs.toString()}`
+        );
         if (status !== 200) {
           return {
             content: [{ type: "text", text: this.errorText(data, "Failed to list notes") }],
@@ -87,12 +118,30 @@ export class ObsidianMCP extends McpAgent<Env> {
     // ── Read a note ───────────────────────────────────────────
     this.server.tool(
       "read_note",
-      "Read the full content of a note by its path",
-      { path: z.string().describe("Path to the note, e.g. 'projects/zoetrope.md'") },
-      async ({ path }) => {
+      "Read a note by path. For very large notes, use offset/max_bytes to page through content (response includes truncated/total_size).",
+      {
+        path: z.string().describe("Path to the note, e.g. 'projects/zoetrope.md'"),
+        offset: z
+          .number()
+          .int()
+          .nonnegative()
+          .default(0)
+          .describe("Byte offset to start reading from (default 0)."),
+        max_bytes: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Max bytes to return. Defaults to the server's configured cap."),
+      },
+      async ({ path, offset, max_bytes }) => {
+        const qs = new URLSearchParams();
+        qs.set("path", path);
+        if (offset) qs.set("offset", String(offset));
+        if (max_bytes) qs.set("max_bytes", String(max_bytes));
         const { status, data } = await this.containerJson(
           "GET",
-          `/api/notes?path=${encodeURIComponent(path)}`
+          `/api/notes?${qs.toString()}`
         );
         if (status === 404) {
           return { content: [{ type: "text", text: `Note not found: ${path}` }] };
@@ -102,6 +151,12 @@ export class ObsidianMCP extends McpAgent<Env> {
             content: [{ type: "text", text: this.errorText(data, "Failed to read note") }],
           };
         }
+        if (data.truncated) {
+          const header =
+            `[truncated: returned ${data.returned_bytes} of ${data.total_size} bytes ` +
+            `from offset ${data.offset}. Call read_note again with offset=${data.offset + data.returned_bytes} for more.]\n\n`;
+          return { content: [{ type: "text", text: header + data.content }] };
+        }
         return { content: [{ type: "text", text: data.content }] };
       }
     );
@@ -109,26 +164,39 @@ export class ObsidianMCP extends McpAgent<Env> {
     // ── Full-text search ──────────────────────────────────────
     this.server.tool(
       "search_notes",
-      "Search across all notes for a text query. Returns matching file paths and snippets.",
-      { query: z.string().describe("Search term (case-insensitive)") },
-      async ({ query }) => {
+      "Search across all notes for a text query. Returns matching paths and snippets, sorted by recency.",
+      {
+        query: z.string().describe("Search term (case-insensitive)"),
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .max(200)
+          .default(20)
+          .describe("Max results to return (default 20, max 200)."),
+      },
+      async ({ query, limit }) => {
         const { status, data } = await this.containerJson(
           "POST",
           "/api/search",
-          { query }
+          { query, limit }
         );
         if (status !== 200) {
           return {
             content: [{ type: "text", text: this.errorText(data, "Search failed") }],
           };
         }
-        if (!data.length) {
+        const results: Array<{ path: string; snippet: string }> = data.results || [];
+        if (!results.length) {
           return { content: [{ type: "text", text: "No results found." }] };
         }
-        const formatted = data
-          .map((r: { path: string; snippet: string }) => `**${r.path}**\n...${r.snippet}...`)
+        const formatted = results
+          .map((r) => `**${r.path}**\n...${r.snippet}...`)
           .join("\n\n---\n\n");
-        return { content: [{ type: "text", text: formatted }] };
+        const footer = data.truncated
+          ? `\n\n---\n\n_Showing ${results.length} of more matches. Increase \`limit\` (max 200) or refine the query._`
+          : "";
+        return { content: [{ type: "text", text: formatted + footer }] };
       }
     );
 
@@ -336,6 +404,8 @@ export class ObsidianSync extends Container<Env> {
     OBSIDIAN_PASSWORD: (this.env as unknown as Env).OBSIDIAN_PASSWORD,
     VAULT_NAME: (this.env as unknown as Env).VAULT_NAME,
     VAULT_PASSWORD: (this.env as unknown as Env).VAULT_PASSWORD,
+    SEARCH_INDEX_ENABLED:
+      (this.env as unknown as Env).SEARCH_INDEX_ENABLED || "",
   };
 
   override async fetch(request: Request): Promise<Response> {
@@ -363,19 +433,43 @@ export class ObsidianSync extends Container<Env> {
 
 // ── Fetch handler ───────────────────────────────────────────────
 
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let r = 0;
+  for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return r === 0;
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
-    // Optional auth: Bearer header or ?token= query param
-    if (env.MCP_AUTH_TOKEN) {
-      const auth = request.headers.get("Authorization");
-      // Extract token from raw query to avoid + being decoded as space
-      const rawToken = url.search.match(/[?&]token=([^&]*)/)?.[1];
-      const urlToken = rawToken ? decodeURIComponent(rawToken) : null;
-      if (auth !== `Bearer ${env.MCP_AUTH_TOKEN}` && urlToken !== env.MCP_AUTH_TOKEN) {
-        return new Response("Unauthorized", { status: 401 });
-      }
+    // Fail closed: refuse to serve if no auth token is configured.
+    const expected = env.MCP_AUTH_TOKEN;
+    if (!expected || expected.length < 16) {
+      return new Response(
+        "Server misconfigured: MCP_AUTH_TOKEN secret is missing or too short " +
+          "(min 16 chars). Refusing to serve. See README for setup.",
+        { status: 503 }
+      );
+    }
+
+    // Auth: Bearer header (preferred) or ?token= query param.
+    // Query-string tokens are convenient for clients that can't set headers,
+    // but they end up in access logs and browser history — prefer headers.
+    const authHeader = request.headers.get("Authorization") || "";
+    const headerToken = authHeader.startsWith("Bearer ")
+      ? authHeader.slice(7)
+      : "";
+    // Extract from raw query so '+' is not decoded as space.
+    const rawToken = url.search.match(/[?&]token=([^&]*)/)?.[1];
+    const urlToken = rawToken ? decodeURIComponent(rawToken) : "";
+
+    if (
+      !timingSafeEqual(headerToken, expected) &&
+      !timingSafeEqual(urlToken, expected)
+    ) {
+      return new Response("Unauthorized", { status: 401 });
     }
 
     // Sync container endpoints

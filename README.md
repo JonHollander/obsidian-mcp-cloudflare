@@ -36,9 +36,9 @@ all MCP tool calls to the Container's API.
 
 | Tool | Description |
 |------|-------------|
-| `list_notes` | List all markdown notes with paths, sizes, and dates |
-| `read_note` | Read the full content of a note by path |
-| `search_notes` | Full-text search across all notes with snippets |
+| `list_notes` | List markdown notes with paths, sizes, dates. Supports `limit`, `cursor`, `prefix`, `updated_since`. |
+| `read_note` | Read a note by path. Supports `offset` / `max_bytes` for paging through large notes. |
+| `search_notes` | Full-text search across all notes with snippets. Supports `limit` (default 20). |
 | `write_note` | Create or overwrite a note |
 | `append_to_note` | Append to an existing note (or create it) |
 | `delete_note` | Delete a note |
@@ -201,9 +201,20 @@ These are left as exercises to harden the setup for your needs:
 
 ### Auth Hardening
 
-The included auth (`MCP_AUTH_TOKEN` secret) supports both `Authorization: Bearer`
-headers and `?token=` query params. The URL token approach is convenient for
-Claude.ai connectors where custom headers aren't always available.
+The included auth (`MCP_AUTH_TOKEN` secret) is **required** — the worker
+returns 503 if it is unset or shorter than 16 characters. It supports both
+`Authorization: Bearer` headers (preferred) and `?token=` query params.
+The URL token approach is convenient for Claude.ai connectors where custom
+headers aren't always available, but be aware: query-string tokens are
+recorded in Cloudflare access logs, browser history, and `Referer` headers.
+Prefer the header form when your client supports it, and rotate the token
+periodically.
+
+Generate a strong token with:
+
+```bash
+openssl rand -hex 32
+```
 
 For shared or public deployments, consider stronger options:
 
@@ -224,16 +235,62 @@ The `ob` sqlite state file lives on ephemeral container disk. A restart triggers
 a full re-sync. To fix: add a SIGTERM trap in `entrypoint.sh` that persists the
 state file, and restore it on startup.
 
+### Response & Result Limits
+
+The container caps payload sizes to keep things responsive on large vaults.
+Defaults can be overridden by setting environment variables on the container
+(via `wrangler.jsonc` `vars` or per-container env):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MAX_BODY_BYTES` | `10485760` (10 MB) | Max accepted request body (returns 413 if exceeded). |
+| `MAX_NOTE_BYTES` | `5242880` (5 MB) | Max bytes returned by `read_note`; clients page with `offset`. |
+| `DEFAULT_LIST_LIMIT` / `MAX_LIST_LIMIT` | `1000` / `10000` | `list_notes` page size. |
+| `DEFAULT_SEARCH_LIMIT` / `MAX_SEARCH_LIMIT` | `20` / `200` | `search_notes` result cap. |
+
 ### Search Performance
 
-The brute-force search reads every `.md` file per query — fine for <500 files.
-For larger vaults, build a search index in [D1](https://developers.cloudflare.com/d1/)
-or [Workers KV](https://developers.cloudflare.com/kv/).
+By default `search_notes` reads every `.md` file per query — fine for vaults
+up to a few thousand notes, especially with the result cap above. For larger
+vaults, enable the built-in SQLite FTS5 index by setting
+`SEARCH_INDEX_ENABLED=true` in `.dev.vars` and redeploying:
+
+```bash
+echo "SEARCH_INDEX_ENABLED=true" >> .dev.vars
+./scripts/setup.sh secrets
+./scripts/setup.sh restart
+```
+
+When enabled the container builds an FTS5 index at `/tmp/index.sqlite` after
+the vault is ready, then keeps it in sync via `fs.watch` plus a 30-second
+mtime safety sweep. Search semantics change slightly:
+
+- Queries are tokenized on whitespace and the **last token gets a prefix
+  match** (`obs` matches `obsidian`); earlier tokens are exact-word matches.
+- Results are ranked by BM25 relevance instead of file recency.
+- FTS5 operator syntax in the query is stripped — the model can't escape
+  into raw FTS expressions.
+
+The index is rebuilt on every cold start (no persistence across container
+restarts; the vault itself is also ephemeral and re-syncs on cold start, so
+the rebuild happens in parallel with `ob sync` and is dominated by it). If
+the index ever fails to open, or while the bulk build is still running,
+search transparently falls back to the brute-force scan.
+
+To revert to the brute-force scan, either set `SEARCH_INDEX_ENABLED=false` in
+`.dev.vars` and re-push secrets, or remove the secret entirely with
+`wrangler secret delete SEARCH_INDEX_ENABLED --name obsidian-mcp`. Then
+`./scripts/setup.sh restart`.
 
 ### Attachments
 
-Currently filters to `.md` only. Extend to support images, PDFs, and other
-vault attachments with additional tools.
+Currently filters to `.md` only — and the container also rejects writes,
+appends, and deletes for any non-`.md` path, plus any path inside
+`.obsidian/`, `.obsidian-*/`, or `.trash/`. This prevents a misbehaving
+client from overwriting Obsidian config or community plugins (which would
+let an attacker run code on your desktop the next time you open the vault).
+To support additional file types, relax this guard deliberately and add
+new tools.
 
 ## Troubleshooting
 

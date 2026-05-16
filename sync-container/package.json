@@ -1,0 +1,10 @@
+{
+  "name": "obsidian-mcp-sync-container",
+  "version": "1.0.0",
+  "private": true,
+  "description": "HTTP API and search indexer that runs inside the obsidian-mcp sync container",
+  "main": "server.js",
+  "dependencies": {
+    "better-sqlite3": "^11.7.0"
+  }
+}
